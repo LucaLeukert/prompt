@@ -1,0 +1,1448 @@
+From 384e085c412d7490561d820b4f0149dcc5901945 Mon Sep 17 00:00:00 2001
+From: lucaleukert <derluleu@gmail.com>
+Date: Thu, 23 Jul 2026 00:56:14 +0200
+Subject: [PATCH] feat: integrate Prompt with Ghostty runtime
+
+---
+ include/ghostty.h                             |  12 +
+ macos/Ghostty.xcodeproj/project.pbxproj       | 548 +++++++++++++++++-
+ .../xcshareddata/swiftpm/Package.resolved     |  38 +-
+ macos/Sources/Ghostty/Ghostty.App.swift       |  29 +-
+ macos/Sources/Ghostty/Ghostty.Config.swift    |  12 +-
+ .../Ghostty/Surface View/SurfaceView.swift    |  50 ++
+ .../Surface View/SurfaceView_AppKit.swift     |  19 +
+ src/Surface.zig                               |  25 +
+ src/apprt/embedded.zig                        |  71 +++
+ src/renderer/Thread.zig                       |   4 +
+ src/renderer/generic.zig                      |  12 +
+ src/renderer/message.zig                      |   5 +
+ 12 files changed, 801 insertions(+), 24 deletions(-)
+
+diff --git a/include/ghostty.h b/include/ghostty.h
+index ee8aa8bcbcd3ec68115556d2133e9d0324667567..16195f3d50204ff0e6f239c103e42000813d3021 100644
+--- a/include/ghostty.h
++++ b/include/ghostty.h
+@@ -1196,6 +1196,8 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
+ GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
++// True while the terminal is displaying the alternate screen used by TUIs.
++GHOSTTY_API bool ghostty_surface_is_alternate_screen(ghostty_surface_t);
+ GHOSTTY_API bool ghostty_surface_scrollbar(ghostty_surface_t,
+                                           ghostty_surface_scrollbar_s*);
+ // Atomically validates the row-space identity and scrolls to an absolute row.
+@@ -1238,6 +1240,10 @@ GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t)
+ // delivery for libghostty embedders.
+ GHOSTTY_API void ghostty_surface_text_input(ghostty_surface_t, const char*, uintptr_t);
+ GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
++// Prompt fork: write already-encoded terminal input to an exec surface. This
++// lets a manual-IO presentation surface forward keys, mouse reports, paste and
++// IME bytes to a hidden authoritative PTY without re-encoding them as text.
++GHOSTTY_API void ghostty_surface_write_input(ghostty_surface_t, const char*, uintptr_t);
+ // cmux fork: upstream already has internal Termio.processOutput. Delete this
+ // C bridge when upstream exports an equivalent surface output API.
+ GHOSTTY_API void ghostty_surface_process_output(ghostty_surface_t, const char*, uintptr_t);
+@@ -1267,6 +1273,12 @@ GHOSTTY_API void ghostty_surface_mouse_scroll(ghostty_surface_t,
+                                                  ghostty_input_scroll_mods_t);
+ GHOSTTY_API void ghostty_surface_mouse_pressure(ghostty_surface_t, uint32_t, double);
+ GHOSTTY_API void ghostty_surface_ime_point(ghostty_surface_t, double*, double*, double*, double*);
++// Prompt fork: returns the OSC 133 input owned by the child line editor.
++// Release successful results with ghostty_surface_free_text.
++GHOSTTY_API bool ghostty_surface_read_prompt_input(ghostty_surface_t, ghostty_text_s*);
++// Prompt fork: native inline composers can own the caret without mutating the
++// child terminal's DEC cursor-visible mode.
++GHOSTTY_API void ghostty_surface_set_host_cursor_visible(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_request_close(ghostty_surface_t);
+ GHOSTTY_API void ghostty_surface_split(ghostty_surface_t, ghostty_action_split_direction_e);
+ GHOSTTY_API void ghostty_surface_split_focus(ghostty_surface_t,
+diff --git a/macos/Ghostty.xcodeproj/project.pbxproj b/macos/Ghostty.xcodeproj/project.pbxproj
+index 6d883ded84c81c6abeaa43002530a9bb1f246e56..c2e692cf14d9e623acdbacd1583b984f3dc0ff66 100644
+--- a/macos/Ghostty.xcodeproj/project.pbxproj
++++ b/macos/Ghostty.xcodeproj/project.pbxproj
+@@ -7,13 +7,32 @@
+ 	objects = {
+ 
+ /* Begin PBXBuildFile section */
++		0F0A0B0C0D0E0F1011121314 /* Fonts in Resources */ = {isa = PBXBuildFile; fileRef = 0F0A0B0C0D0E0F1011121315 /* Fonts */; };
++		1D12AF1A81DA6C7979F75EA4 /* locale in Resources */ = {isa = PBXBuildFile; fileRef = A546F1132D7B68D7003B11A0 /* locale */; };
++		21D4E7323A7253A17BDBD667 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = ADC3B86ED58957D770A7A175 /* Foundation.framework */; };
+ 		29C15B1D2CDC3B2900520DD4 /* bat in Resources */ = {isa = PBXBuildFile; fileRef = 29C15B1C2CDC3B2000520DD4 /* bat */; };
++		2D4706EF8E5A9C27A0B0619C /* bash-completion in Resources */ = {isa = PBXBuildFile; fileRef = FC9ABA9B2D0F538D0020D4C8 /* bash-completion */; };
++		2EFBDE3ACF4028D43B11312D /* zsh in Resources */ = {isa = PBXBuildFile; fileRef = FC5218F92D10FFC7004C93E0 /* zsh */; };
++		2F2C33C384024CABDED170ED /* vim in Resources */ = {isa = PBXBuildFile; fileRef = 552964E52B34A9B400030505 /* vim */; };
++		3A7C8A538BC43C3AFC501CE5 /* PromptModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4E4ECCDF3C5FBB83306FD1E /* PromptModelTests.swift */; };
++		3F0A64B72ADDFDA748FDA4B2 /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 55154BDF2B33911F001622DC /* ghostty */; };
++		4A7DA85C549FF48CCD76EFF5 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A0033D50000100A10001 /* MarkdownUI */; };
++		4D30D8B1FF55C387D60C06B8 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
++		53F698AC87735B7DD9D134A2 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
+ 		55154BE02B33911F001622DC /* ghostty in Resources */ = {isa = PBXBuildFile; fileRef = 55154BDF2B33911F001622DC /* ghostty */; };
+ 		552964E62B34A9B400030505 /* vim in Resources */ = {isa = PBXBuildFile; fileRef = 552964E52B34A9B400030505 /* vim */; };
++		581EB2F7E0B3EB20B34CEDA4 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A56B880A2A840447007A0E29 /* Carbon.framework */; };
++		596D97E612D160C7951765A4 /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A0053D50000100A10001 /* SwiftMath */; };
++		65B9031809379167D042F286 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
++		782AFE68BDC7D46A94252CEF /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 042A2CB636FF9120560128A7 /* Cocoa.framework */; };
+ 		819324582F24E78800A9ED8F /* DockTilePlugin.plugin in Copy DockTilePlugin */ = {isa = PBXBuildFile; fileRef = 8193244D2F24E6C000A9ED8F /* DockTilePlugin.plugin */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+ 		819324642F24FF2100A9ED8F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
+ 		8F3A9B4C2FA6B88000A18D13 /* Ghostty.sdef in Resources */ = {isa = PBXBuildFile; fileRef = 8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */; };
++		9208840B68A4495766390D84 /* bat in Resources */ = {isa = PBXBuildFile; fileRef = 29C15B1C2CDC3B2000520DD4 /* bat */; };
+ 		9351BE8E3D22937F003B3499 /* nvim in Resources */ = {isa = PBXBuildFile; fileRef = 9351BE8E2D22937F003B3499 /* nvim */; };
++		9EFF7339B8BEFD555B008472 /* PromptAITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936948DBCD6E02A080A002F8 /* PromptAITests.swift */; };
++		A089B7A6A6E3DBD83C874EDB /* terminfo in Resources */ = {isa = PBXBuildFile; fileRef = A5A1F8842A489D6800D1E8BC /* terminfo */; };
++		A43BAF067A255BDE6F4F7A7A /* man in Resources */ = {isa = PBXBuildFile; fileRef = A5985CE52C33060F00C57AD3 /* man */; };
+ 		A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
+ 		A53D0C8E2B53B0EA00305CE6 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */; };
+ 		A53D0C952B53B4D800305CE6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
+@@ -26,11 +45,24 @@
+ 		A5985CE62C33060F00C57AD3 /* man in Resources */ = {isa = PBXBuildFile; fileRef = A5985CE52C33060F00C57AD3 /* man */; };
+ 		A5A1F8852A489D6800D1E8BC /* terminfo in Resources */ = {isa = PBXBuildFile; fileRef = A5A1F8842A489D6800D1E8BC /* terminfo */; };
+ 		A5B30539299BEAAB0047F10C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
++		B44D250248011DE6150520A2 /* Ghostty.icon in Resources */ = {isa = PBXBuildFile; fileRef = A553F4122E06EB1600257779 /* Ghostty.icon */; };
++		C0D3A0013D50000100A10001 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A0033D50000100A10001 /* MarkdownUI */; };
++		C0D3A0023D50000100A10001 /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = C0D3A0053D50000100A10001 /* SwiftMath */; };
++		D11836108137B8EA116E73D0 /* fish in Resources */ = {isa = PBXBuildFile; fileRef = A586167B2B7703CC009BDB1D /* fish */; };
++		D6AAD3A0F02BEE238315CB1E /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A51BFC262B30F1B800E92F16 /* Sparkle */; };
++		F4D76C36EBA6ED8160A80C0E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A5B30538299BEAAB0047F10C /* Assets.xcassets */; };
+ 		FC5218FA2D10FFCE004C93E0 /* zsh in Resources */ = {isa = PBXBuildFile; fileRef = FC5218F92D10FFC7004C93E0 /* zsh */; };
+ 		FC9ABA9C2D0F53F80020D4C8 /* bash-completion in Resources */ = {isa = PBXBuildFile; fileRef = FC9ABA9B2D0F538D0020D4C8 /* bash-completion */; };
+ /* End PBXBuildFile section */
+ 
+ /* Begin PBXContainerItemProxy section */
++		00634E73A8B2296C2DCA825B /* PBXContainerItemProxy */ = {
++			isa = PBXContainerItemProxy;
++			containerPortal = A5B30529299BEAAA0047F10C /* Project object */;
++			proxyType = 1;
++			remoteGlobalIDString = 81C244EF7DFBCBA9B6858105;
++			remoteInfo = Prompt;
++		};
+ 		810ACCA52E9D3302004F8F92 /* PBXContainerItemProxy */ = {
+ 			isa = PBXContainerItemProxy;
+ 			containerPortal = A5B30529299BEAAA0047F10C /* Project object */;
+@@ -52,6 +84,13 @@
+ 			remoteGlobalIDString = A5B30530299BEAAA0047F10C;
+ 			remoteInfo = Ghostty;
+ 		};
++		D472DC5506FAFC99253EA479 /* PBXContainerItemProxy */ = {
++			isa = PBXContainerItemProxy;
++			containerPortal = A5B30529299BEAAA0047F10C /* Project object */;
++			proxyType = 1;
++			remoteGlobalIDString = 8193244C2F24E6C000A9ED8F;
++			remoteInfo = DockTilePlugin;
++		};
+ /* End PBXContainerItemProxy section */
+ 
+ /* Begin PBXCopyFilesBuildPhase section */
+@@ -69,6 +108,8 @@
+ /* End PBXCopyFilesBuildPhase section */
+ 
+ /* Begin PBXFileReference section */
++		0F0A0B0C0D0E0F1011121315 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fonts; path = Resources/Prompt/Fonts; sourceTree = SOURCE_ROOT; };
++		042A2CB636FF9120560128A7 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+ 		29C15B1C2CDC3B2000520DD4 /* bat */ = {isa = PBXFileReference; lastKnownFileType = folder; name = bat; path = "../zig-out/share/bat"; sourceTree = "<group>"; };
+ 		3B39CAA42B33949B00DABEB8 /* GhosttyReleaseLocal.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GhosttyReleaseLocal.entitlements; sourceTree = "<group>"; };
+ 		55154BDF2B33911F001622DC /* ghostty */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ghostty; path = "../zig-out/share/ghostty"; sourceTree = "<group>"; };
+@@ -77,6 +118,8 @@
+ 		8193244D2F24E6C000A9ED8F /* DockTilePlugin.plugin */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DockTilePlugin.plugin; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */ = {isa = PBXFileReference; lastKnownFileType = text.sdef; path = Ghostty.sdef; sourceTree = "<group>"; };
+ 		9351BE8E2D22937F003B3499 /* nvim */ = {isa = PBXFileReference; lastKnownFileType = folder; name = nvim; path = "../zig-out/share/nvim"; sourceTree = "<group>"; };
++		936948DBCD6E02A080A002F8 /* PromptAITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PromptAITests.swift; sourceTree = "<group>"; };
++		A1EA2BDA10F0EF0BC34BBC43 /* Prompt.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Prompt.app; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		A51BFC282B30F26D00E92F16 /* GhosttyDebug.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = GhosttyDebug.entitlements; sourceTree = "<group>"; };
+ 		A546F1132D7B68D7003B11A0 /* locale */ = {isa = PBXFileReference; lastKnownFileType = folder; name = locale; path = "../zig-out/share/locale"; sourceTree = "<group>"; };
+ 		A54F45F32E1F047A0046BD5C /* GhosttyTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GhosttyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+@@ -91,12 +134,15 @@
+ 		A5B3053D299BEAAB0047F10C /* Ghostty.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Ghostty.entitlements; sourceTree = "<group>"; };
+ 		A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Ghostty-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = GhosttyKit.xcframework; sourceTree = "<group>"; };
++		ADC3B86ED58957D770A7A175 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
++		F4E4ECCDF3C5FBB83306FD1E /* PromptModelTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PromptModelTests.swift; sourceTree = "<group>"; };
+ 		FC5218F92D10FFC7004C93E0 /* zsh */ = {isa = PBXFileReference; lastKnownFileType = folder; name = zsh; path = "../zig-out/share/zsh"; sourceTree = "<group>"; };
+ 		FC9ABA9B2D0F538D0020D4C8 /* bash-completion */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "bash-completion"; path = "../zig-out/share/bash-completion"; sourceTree = "<group>"; };
++		FE53BBBC76601FB3170FBCE1 /* PromptTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PromptTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+ /* End PBXFileReference section */
+ 
+ /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+-		8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
++		8193245D2F24E80800A9ED8F /* Exceptions for "Sources" folder in "DockTilePlugin" target */ = {
+ 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+ 			membershipExceptions = (
+ 				"Features/Custom App Icon/AppIcon.swift",
+@@ -113,7 +159,7 @@
+ 			);
+ 			target = 8193244C2F24E6C000A9ED8F /* DockTilePlugin */;
+ 		};
+-		81F82CB02E8281F5001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
++		81F82CB02E8281F5001EDFA7 /* Exceptions for "Sources" folder in "Ghostty-iOS" target */ = {
+ 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+ 			membershipExceptions = (
+ 				App/macOS/AppDelegate.swift,
+@@ -152,8 +198,11 @@
+ 				Features/ClipboardConfirmation/ClipboardConfirmation.xib,
+ 				Features/ClipboardConfirmation/ClipboardConfirmationController.swift,
+ 				Features/ClipboardConfirmation/ClipboardConfirmationView.swift,
+-				"Features/Command Palette/CommandPalette.swift",
+-				"Features/Command Palette/TerminalCommandPalette.swift",
++				"Prompt/Command Palette/PaletteComponents.swift",
++				"Prompt/Command Palette/SessionLauncherOverlay.swift",
++				Prompt/PromptAI.swift,
++				Prompt/PromptCompletionContextEngine.swift,
++				Prompt/PromptContextEngine.swift,
+ 				"Features/Custom App Icon/AppIcon.swift",
+ 				"Features/Custom App Icon/ColorizedGhosttyIcon.swift",
+ 				"Features/Custom App Icon/ColorizedGhosttyIconImage.swift",
+@@ -258,21 +307,82 @@
+ 			);
+ 			target = A5D4499C2B53AE7B000F5B83 /* Ghostty-iOS */;
+ 		};
+-		81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
++		81F82CB12E8281F9001EDFA7 /* Exceptions for "Sources" folder in "Ghostty" target */ = {
+ 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+ 			membershipExceptions = (
+ 				App/iOS/iOSApp.swift,
+ 				"Features/Custom App Icon/DockTilePlugin.swift",
+ 				"Ghostty/Surface View/SurfaceView_UIKit.swift",
++				"Prompt/Command Palette/SessionLauncherOverlay.swift",
++				"Prompt/Command Palette/PaletteComponents.swift",
++				Prompt/App/PromptRestorationState.swift,
++				Prompt/PromptAI.swift,
++				Prompt/Workspace/PromptWorkspace.swift,
++				Prompt/PromptContextEngine.swift,
++				Prompt/Sessions/PromptSession.swift,
++				Prompt/Panes/PromptPane.swift,
++				Prompt/PromptCompletionContextEngine.swift,
++				Prompt/Terminal/PromptTerminalSurface.swift,
++				Prompt/App/PromptApplicationDelegate.swift,
++				Prompt/App/PromptMain.swift,
++				Prompt/App/PromptWindowController.swift,
++				Prompt/Workspace/PromptWorkspaceStore.swift,
++				Prompt/Terminal/PromptTerminalRuntime.swift,
++				Prompt/Terminal/PromptTerminalIntegration.swift,
+ 			);
+ 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
+ 		};
++		DC36584CDEC48D8780211B90 /* Exceptions for "Sources" folder in "Prompt" target */ = {
++			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
++			membershipExceptions = (
++				App/iOS/iOSApp.swift,
++				"Features/Custom App Icon/DockTilePlugin.swift",
++				"Ghostty/Surface View/SurfaceView_UIKit.swift",
++				App/macOS/main.swift,
++				App/macOS/MainMenu.xib,
++			);
++			target = 81C244EF7DFBCBA9B6858105 /* Prompt */;
++		};
+ /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+ 
+ /* Begin PBXFileSystemSynchronizedRootGroup section */
+-		810ACCA02E9D3302004F8F92 /* GhosttyUITests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = GhosttyUITests; sourceTree = "<group>"; };
+-		81F82BC72E82815D001EDFA7 /* Sources */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (81F82CB12E8281F9001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 81F82CB02E8281F5001EDFA7 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, 8193245D2F24E80800A9ED8F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Sources; sourceTree = "<group>"; };
+-		A54F45F42E1F047A0046BD5C /* Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Tests; sourceTree = "<group>"; };
++		810ACCA02E9D3302004F8F92 /* GhosttyUITests */ = {
++			isa = PBXFileSystemSynchronizedRootGroup;
++			exceptions = (
++			);
++			explicitFileTypes = {
++			};
++			explicitFolders = (
++			);
++			path = GhosttyUITests;
++			sourceTree = "<group>";
++		};
++		81F82BC72E82815D001EDFA7 /* Sources */ = {
++			isa = PBXFileSystemSynchronizedRootGroup;
++			exceptions = (
++				81F82CB12E8281F9001EDFA7 /* Exceptions for "Sources" folder in "Ghostty" target */,
++				81F82CB02E8281F5001EDFA7 /* Exceptions for "Sources" folder in "Ghostty-iOS" target */,
++				8193245D2F24E80800A9ED8F /* Exceptions for "Sources" folder in "DockTilePlugin" target */,
++				DC36584CDEC48D8780211B90 /* Exceptions for "Sources" folder in "Prompt" target */,
++			);
++			explicitFileTypes = {
++			};
++			explicitFolders = (
++			);
++			path = Sources;
++			sourceTree = "<group>";
++		};
++		A54F45F42E1F047A0046BD5C /* Tests */ = {
++			isa = PBXFileSystemSynchronizedRootGroup;
++			exceptions = (
++			);
++			explicitFileTypes = {
++			};
++			explicitFolders = (
++			);
++			path = Tests;
++			sourceTree = "<group>";
++		};
+ /* End PBXFileSystemSynchronizedRootGroup section */
+ 
+ /* Begin PBXFrameworksBuildPhase section */
+@@ -290,6 +400,14 @@
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
++		90F87C90B41ACE248B731626 /* Frameworks */ = {
++			isa = PBXFrameworksBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				21D4E7323A7253A17BDBD667 /* Foundation.framework in Frameworks */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
+ 		A54F45F02E1F047A0046BD5C /* Frameworks */ = {
+ 			isa = PBXFrameworksBuildPhase;
+ 			buildActionMask = 2147483647;
+@@ -301,6 +419,8 @@
+ 			isa = PBXFrameworksBuildPhase;
+ 			buildActionMask = 2147483647;
+ 			files = (
++				C0D3A0013D50000100A10001 /* MarkdownUI in Frameworks */,
++				C0D3A0023D50000100A10001 /* SwiftMath in Frameworks */,
+ 				A51BFC272B30F1B800E92F16 /* Sparkle in Frameworks */,
+ 				A56B880B2A840447007A0E29 /* Carbon.framework in Frameworks */,
+ 				A571AB1D2A206FCF00248498 /* GhosttyKit.xcframework in Frameworks */,
+@@ -315,6 +435,19 @@
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
++		C3518D04E44D3E1D5EA8204D /* Frameworks */ = {
++			isa = PBXFrameworksBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				782AFE68BDC7D46A94252CEF /* Cocoa.framework in Frameworks */,
++				4A7DA85C549FF48CCD76EFF5 /* MarkdownUI in Frameworks */,
++				596D97E612D160C7951765A4 /* SwiftMath in Frameworks */,
++				D6AAD3A0F02BEE238315CB1E /* Sparkle in Frameworks */,
++				581EB2F7E0B3EB20B34CEDA4 /* Carbon.framework in Frameworks */,
++				53F698AC87735B7DD9D134A2 /* GhosttyKit.xcframework in Frameworks */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
+ /* End PBXFrameworksBuildPhase section */
+ 
+ /* Begin PBXGroup section */
+@@ -338,6 +471,7 @@
+ 		A5B30528299BEAAA0047F10C = {
+ 			isa = PBXGroup;
+ 			children = (
++				0F0A0B0C0D0E0F1011121315 /* Fonts */,
+ 				A571AB1C2A206FC600248498 /* Ghostty-Info.plist */,
+ 				8F3A9B4B2FA6B88000A18D13 /* Ghostty.sdef */,
+ 				A5B30538299BEAAB0047F10C /* Assets.xcassets */,
+@@ -351,6 +485,7 @@
+ 				A5D495A3299BECBA00DD1313 /* Frameworks */,
+ 				A5A1F8862A489D7400D1E8BC /* Resources */,
+ 				A5B30532299BEAAA0047F10C /* Products */,
++				ABDEE1CC1D364BA8264C4D2D /* PromptTests */,
+ 			);
+ 			sourceTree = "<group>";
+ 		};
+@@ -362,6 +497,8 @@
+ 				A54F45F32E1F047A0046BD5C /* GhosttyTests.xctest */,
+ 				810ACC9F2E9D3301004F8F92 /* GhosttyUITests.xctest */,
+ 				8193244D2F24E6C000A9ED8F /* DockTilePlugin.plugin */,
++				A1EA2BDA10F0EF0BC34BBC43 /* Prompt.app */,
++				FE53BBBC76601FB3170FBCE1 /* PromptTests.xctest */,
+ 			);
+ 			name = Products;
+ 			sourceTree = "<group>";
+@@ -371,10 +508,30 @@
+ 			children = (
+ 				A56B880A2A840447007A0E29 /* Carbon.framework */,
+ 				A5D495A1299BEC7E00DD1313 /* GhosttyKit.xcframework */,
++				AA8E231ED289AD9C76908A8E /* OS X */,
+ 			);
+ 			name = Frameworks;
+ 			sourceTree = "<group>";
+ 		};
++		AA8E231ED289AD9C76908A8E /* OS X */ = {
++			isa = PBXGroup;
++			children = (
++				042A2CB636FF9120560128A7 /* Cocoa.framework */,
++				ADC3B86ED58957D770A7A175 /* Foundation.framework */,
++			);
++			name = "OS X";
++			sourceTree = "<group>";
++		};
++		ABDEE1CC1D364BA8264C4D2D /* PromptTests */ = {
++			isa = PBXGroup;
++			children = (
++				936948DBCD6E02A080A002F8 /* PromptAITests.swift */,
++				F4E4ECCDF3C5FBB83306FD1E /* PromptModelTests.swift */,
++			);
++			name = PromptTests;
++			path = Tests;
++			sourceTree = "<group>";
++		};
+ /* End PBXGroup section */
+ 
+ /* Begin PBXNativeTarget section */
+@@ -395,8 +552,6 @@
+ 				810ACCA02E9D3302004F8F92 /* GhosttyUITests */,
+ 			);
+ 			name = GhosttyUITests;
+-			packageProductDependencies = (
+-			);
+ 			productName = GhosttyUITests;
+ 			productReference = 810ACC9F2E9D3301004F8F92 /* GhosttyUITests.xctest */;
+ 			productType = "com.apple.product-type.bundle.ui-testing";
+@@ -414,12 +569,36 @@
+ 			dependencies = (
+ 			);
+ 			name = DockTilePlugin;
+-			packageProductDependencies = (
+-			);
+ 			productName = DockTilePlugin;
+ 			productReference = 8193244D2F24E6C000A9ED8F /* DockTilePlugin.plugin */;
+ 			productType = "com.apple.product-type.bundle";
+ 		};
++		81C244EF7DFBCBA9B6858105 /* Prompt */ = {
++			isa = PBXNativeTarget;
++			buildConfigurationList = B5260DF4A61CFCBE50CC125C /* Build configuration list for PBXNativeTarget "Prompt" */;
++			buildPhases = (
++				A2EA8C70D45A551B82DA327C /* Sources */,
++				C3518D04E44D3E1D5EA8204D /* Frameworks */,
++				AC456D96CC64406F8269A7DD /* Resources */,
++			);
++			buildRules = (
++			);
++			dependencies = (
++				0DAFE136857C3CA7FA3DBF4B /* PBXTargetDependency */,
++			);
++			fileSystemSynchronizedGroups = (
++				81F82BC72E82815D001EDFA7 /* Sources */,
++			);
++			name = Prompt;
++			packageProductDependencies = (
++				C0D3A0033D50000100A10001 /* MarkdownUI */,
++				C0D3A0053D50000100A10001 /* SwiftMath */,
++				A51BFC262B30F1B800E92F16 /* Sparkle */,
++			);
++			productName = Prompt;
++			productReference = A1EA2BDA10F0EF0BC34BBC43 /* Prompt.app */;
++			productType = "com.apple.product-type.application";
++		};
+ 		A54F45F22E1F047A0046BD5C /* GhosttyTests */ = {
+ 			isa = PBXNativeTarget;
+ 			buildConfigurationList = A54F45FC2E1F047A0046BD5C /* Build configuration list for PBXNativeTarget "GhosttyTests" */;
+@@ -437,8 +616,6 @@
+ 				A54F45F42E1F047A0046BD5C /* Tests */,
+ 			);
+ 			name = GhosttyTests;
+-			packageProductDependencies = (
+-			);
+ 			productName = GhosttyTests;
+ 			productReference = A54F45F32E1F047A0046BD5C /* GhosttyTests.xctest */;
+ 			productType = "com.apple.product-type.bundle.unit-test";
+@@ -464,6 +641,8 @@
+ 			name = Ghostty;
+ 			packageProductDependencies = (
+ 				A51BFC262B30F1B800E92F16 /* Sparkle */,
++				C0D3A0033D50000100A10001 /* MarkdownUI */,
++				C0D3A0053D50000100A10001 /* SwiftMath */,
+ 			);
+ 			productName = Ghostty;
+ 			productReference = A5B30531299BEAAA0047F10C /* Ghostty.app */;
+@@ -489,6 +668,24 @@
+ 			productReference = A5D4499D2B53AE7B000F5B83 /* Ghostty-iOS.app */;
+ 			productType = "com.apple.product-type.application";
+ 		};
++		AC7CCBC93F97313C990399C5 /* PromptTests */ = {
++			isa = PBXNativeTarget;
++			buildConfigurationList = 1EFB5B89F610A8D1F34402D7 /* Build configuration list for PBXNativeTarget "PromptTests" */;
++			buildPhases = (
++				4EF21380D9FE92CB9170C383 /* Sources */,
++				90F87C90B41ACE248B731626 /* Frameworks */,
++				FC24C19D8225F88FD14895A2 /* Resources */,
++			);
++			buildRules = (
++			);
++			dependencies = (
++				E12C3DA03A61656F5B36652F /* PBXTargetDependency */,
++			);
++			name = PromptTests;
++			productName = PromptTests;
++			productReference = FE53BBBC76601FB3170FBCE1 /* PromptTests.xctest */;
++			productType = "com.apple.product-type.bundle.unit-test";
++		};
+ /* End PBXNativeTarget section */
+ 
+ /* Begin PBXProject section */
+@@ -530,6 +727,8 @@
+ 			mainGroup = A5B30528299BEAAA0047F10C;
+ 			packageReferences = (
+ 				A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */,
++				C0D3A0043D50000100A10001 /* XCRemoteSwiftPackageReference "MarkdownUI" */,
++				C0D3A0063D50000100A10001 /* XCRemoteSwiftPackageReference "SwiftMath" */,
+ 			);
+ 			productRefGroup = A5B30532299BEAAA0047F10C /* Products */;
+ 			projectDirPath = "";
+@@ -540,6 +739,8 @@
+ 				8193244C2F24E6C000A9ED8F /* DockTilePlugin */,
+ 				A54F45F22E1F047A0046BD5C /* GhosttyTests */,
+ 				810ACC9E2E9D3301004F8F92 /* GhosttyUITests */,
++				81C244EF7DFBCBA9B6858105 /* Prompt */,
++				AC7CCBC93F97313C990399C5 /* PromptTests */,
+ 			);
+ 		};
+ /* End PBXProject section */
+@@ -596,6 +797,34 @@
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
++		AC456D96CC64406F8269A7DD /* Resources */ = {
++			isa = PBXResourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				0F0A0B0C0D0E0F1011121314 /* Fonts in Resources */,
++				2D4706EF8E5A9C27A0B0619C /* bash-completion in Resources */,
++				B44D250248011DE6150520A2 /* Ghostty.icon in Resources */,
++				9208840B68A4495766390D84 /* bat in Resources */,
++				D11836108137B8EA116E73D0 /* fish in Resources */,
++				65B9031809379167D042F286 /* Ghostty.sdef in Resources */,
++				3F0A64B72ADDFDA748FDA4B2 /* ghostty in Resources */,
++				1D12AF1A81DA6C7979F75EA4 /* locale in Resources */,
++				A43BAF067A255BDE6F4F7A7A /* man in Resources */,
++				4D30D8B1FF55C387D60C06B8 /* nvim in Resources */,
++				A089B7A6A6E3DBD83C874EDB /* terminfo in Resources */,
++				2F2C33C384024CABDED170ED /* vim in Resources */,
++				2EFBDE3ACF4028D43B11312D /* zsh in Resources */,
++				F4D76C36EBA6ED8160A80C0E /* Assets.xcassets in Resources */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
++		FC24C19D8225F88FD14895A2 /* Resources */ = {
++			isa = PBXResourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
+ /* End PBXResourcesBuildPhase section */
+ 
+ /* Begin PBXShellScriptBuildPhase section */
+@@ -622,6 +851,15 @@
+ /* End PBXShellScriptBuildPhase section */
+ 
+ /* Begin PBXSourcesBuildPhase section */
++		4EF21380D9FE92CB9170C383 /* Sources */ = {
++			isa = PBXSourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++				9EFF7339B8BEFD555B008472 /* PromptAITests.swift in Sources */,
++				3A7C8A538BC43C3AFC501CE5 /* PromptModelTests.swift in Sources */,
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
+ 		810ACC9B2E9D3301004F8F92 /* Sources */ = {
+ 			isa = PBXSourcesBuildPhase;
+ 			buildActionMask = 2147483647;
+@@ -636,6 +874,13 @@
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
++		A2EA8C70D45A551B82DA327C /* Sources */ = {
++			isa = PBXSourcesBuildPhase;
++			buildActionMask = 2147483647;
++			files = (
++			);
++			runOnlyForDeploymentPostprocessing = 0;
++		};
+ 		A54F45EF2E1F047A0046BD5C /* Sources */ = {
+ 			isa = PBXSourcesBuildPhase;
+ 			buildActionMask = 2147483647;
+@@ -660,6 +905,12 @@
+ /* End PBXSourcesBuildPhase section */
+ 
+ /* Begin PBXTargetDependency section */
++		0DAFE136857C3CA7FA3DBF4B /* PBXTargetDependency */ = {
++			isa = PBXTargetDependency;
++			name = DockTilePlugin;
++			target = 8193244C2F24E6C000A9ED8F /* DockTilePlugin */;
++			targetProxy = D472DC5506FAFC99253EA479 /* PBXContainerItemProxy */;
++		};
+ 		810ACCA62E9D3302004F8F92 /* PBXTargetDependency */ = {
+ 			isa = PBXTargetDependency;
+ 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
+@@ -675,9 +926,141 @@
+ 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
+ 			targetProxy = A54F45F72E1F047A0046BD5C /* PBXContainerItemProxy */;
+ 		};
++		E12C3DA03A61656F5B36652F /* PBXTargetDependency */ = {
++			isa = PBXTargetDependency;
++			name = Prompt;
++			target = 81C244EF7DFBCBA9B6858105 /* Prompt */;
++			targetProxy = 00634E73A8B2296C2DCA825B /* PBXContainerItemProxy */;
++		};
+ /* End PBXTargetDependency section */
+ 
+ /* Begin XCBuildConfiguration section */
++		0014762F65E8128289A07FC0 /* ReleaseLocal */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				ASSETCATALOG_COMPILER_APPICON_NAME = Ghostty;
++				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
++				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
++				CLANG_ENABLE_MODULES = YES;
++				CODE_SIGN_ENTITLEMENTS = GhosttyReleaseLocal.entitlements;
++				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
++				CODE_SIGN_STYLE = Automatic;
++				COMBINE_HIDPI_IMAGES = YES;
++				CURRENT_PROJECT_VERSION = 1;
++				DEAD_CODE_STRIPPING = YES;
++				DEVELOPMENT_TEAM = "";
++				ENABLE_HARDENED_RUNTIME = YES;
++				ENABLE_PREVIEWS = YES;
++				EXECUTABLE_NAME = Prompt;
++				GCC_OPTIMIZATION_LEVEL = fast;
++				GENERATE_INFOPLIST_FILE = YES;
++				INFOPLIST_FILE = "Ghostty-Info.plist";
++				INFOPLIST_KEY_CFBundleDisplayName = Prompt;
++				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
++				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within Ghostty would like to use AppleScript.";
++				INFOPLIST_KEY_NSAudioCaptureUsageDescription = "A program running within Ghostty would like to access your system's audio.";
++				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within Ghostty would like to use Bluetooth.";
++				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within Ghostty would like to access your Calendar.";
++				INFOPLIST_KEY_NSCameraUsageDescription = "A program running within Ghostty would like to use the camera.";
++				INFOPLIST_KEY_NSContactsUsageDescription = "A program running within Ghostty would like to access your Contacts.";
++				INFOPLIST_KEY_NSHumanReadableCopyright = "";
++				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "A program running within Ghostty would like to access the local network.";
++				INFOPLIST_KEY_NSLocationTemporaryUsageDescriptionDictionary = "A program running within Ghostty would like to use your location temporarily.";
++				INFOPLIST_KEY_NSLocationUsageDescription = "A program running within Ghostty would like to access your location information.";
++				INFOPLIST_KEY_NSMicrophoneUsageDescription = "A program running within Ghostty would like to use your microphone.";
++				INFOPLIST_KEY_NSMotionUsageDescription = "A program running within Ghostty would like to access motion data.";
++				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "A program running within Ghostty would like to access your Photo Library.";
++				INFOPLIST_KEY_NSRemindersUsageDescription = "A program running within Ghostty would like to access your reminders.";
++				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within Ghostty would like to use speech recognition.";
++				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within Ghostty requires elevated privileges.";
++				INFOPLIST_PREPROCESS = YES;
++				LD_RUNPATH_SEARCH_PATHS = (
++					"$(inherited)",
++					"@executable_path/../Frameworks",
++				);
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				MARKETING_VERSION = 0.1;
++				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal;
++				PRODUCT_MODULE_NAME = Prompt;
++				PRODUCT_NAME = Prompt;
++				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) PROMPT";
++				SWIFT_EMIT_LOC_STRINGS = YES;
++				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
++				SWIFT_VERSION = 5.0;
++			};
++			name = ReleaseLocal;
++		};
++		023717283BF363B0F7E32EA1 /* Debug */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				BUNDLE_LOADER = "$(TEST_HOST)";
++				GENERATE_INFOPLIST_FILE = YES;
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal.tests;
++				PRODUCT_MODULE_NAME = PromptTests;
++				PRODUCT_NAME = PromptTests;
++				SWIFT_VERSION = 5.0;
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/Contents/MacOS/Prompt";
++			};
++			name = Debug;
++		};
++		0B10C9553CF7B11EDEBBC096 /* Debug */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				ASSETCATALOG_COMPILER_APPICON_NAME = Ghostty;
++				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
++				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
++				CLANG_ENABLE_MODULES = YES;
++				CODE_SIGN_ENTITLEMENTS = GhosttyDebug.entitlements;
++				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
++				CODE_SIGN_STYLE = Automatic;
++				COMBINE_HIDPI_IMAGES = YES;
++				CURRENT_PROJECT_VERSION = 1;
++				DEAD_CODE_STRIPPING = YES;
++				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
++				DEVELOPMENT_TEAM = "";
++				ENABLE_HARDENED_RUNTIME = YES;
++				ENABLE_PREVIEWS = YES;
++				EXECUTABLE_NAME = Prompt;
++				GENERATE_INFOPLIST_FILE = YES;
++				INFOPLIST_FILE = "Ghostty-Info.plist";
++				INFOPLIST_KEY_CFBundleDisplayName = Prompt;
++				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
++				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within Ghostty would like to use AppleScript.";
++				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within Ghostty would like to use Bluetooth.";
++				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within Ghostty would like to access your Calendar.";
++				INFOPLIST_KEY_NSCameraUsageDescription = "A program running within Ghostty would like to use the camera.";
++				INFOPLIST_KEY_NSContactsUsageDescription = "A program running within Ghostty would like to access your Contacts.";
++				INFOPLIST_KEY_NSHumanReadableCopyright = "";
++				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "A program running within Ghostty would like to access the local network.";
++				INFOPLIST_KEY_NSLocationTemporaryUsageDescriptionDictionary = "A program running within Ghostty would like to use your location temporarily.";
++				INFOPLIST_KEY_NSLocationUsageDescription = "A program running within Ghostty would like to access your location information.";
++				INFOPLIST_KEY_NSMicrophoneUsageDescription = "A program running within Ghostty would like to use your microphone.";
++				INFOPLIST_KEY_NSMotionUsageDescription = "A program running within Ghostty would like to access motion data.";
++				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "A program running within Ghostty would like to access your Photo Library.";
++				INFOPLIST_KEY_NSRemindersUsageDescription = "A program running within Ghostty would like to access your reminders.";
++				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within Ghostty would like to use speech recognition.";
++				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within Ghostty requires elevated privileges.";
++				INFOPLIST_PREPROCESS = YES;
++				LD_RUNPATH_SEARCH_PATHS = (
++					"$(inherited)",
++					"@executable_path/../Frameworks",
++				);
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				MARKETING_VERSION = 0.1;
++				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal.debug;
++				PRODUCT_MODULE_NAME = Prompt;
++				PRODUCT_NAME = Prompt;
++				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) PROMPT";
++				SWIFT_EMIT_LOC_STRINGS = YES;
++				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
++				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
++				SWIFT_VERSION = 5.0;
++			};
++			name = Debug;
++		};
+ 		3B39CAA22B33946300DABEB8 /* ReleaseLocal */ = {
+ 			isa = XCBuildConfiguration;
+ 			buildSettings = {
+@@ -788,6 +1171,20 @@
+ 			};
+ 			name = ReleaseLocal;
+ 		};
++		79D0EB8773B0D7AEE4A70394 /* ReleaseLocal */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				BUNDLE_LOADER = "$(TEST_HOST)";
++				GENERATE_INFOPLIST_FILE = YES;
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal.tests;
++				PRODUCT_MODULE_NAME = PromptTests;
++				PRODUCT_NAME = PromptTests;
++				SWIFT_VERSION = 5.0;
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/Contents/MacOS/Prompt";
++			};
++			name = ReleaseLocal;
++		};
+ 		810ACCA82E9D3302004F8F92 /* Debug */ = {
+ 			isa = XCBuildConfiguration;
+ 			buildSettings = {
+@@ -964,7 +1361,7 @@
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+ 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+ 				SWIFT_VERSION = 5.0;
+-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+ 			};
+ 			name = Debug;
+ 		};
+@@ -987,7 +1384,7 @@
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+ 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+ 				SWIFT_VERSION = 5.0;
+-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+ 			};
+ 			name = Release;
+ 		};
+@@ -1010,7 +1407,7 @@
+ 				SWIFT_EMIT_LOC_STRINGS = NO;
+ 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+ 				SWIFT_VERSION = 5.0;
+-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Ghostty.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ghostty";
+ 			};
+ 			name = ReleaseLocal;
+ 		};
+@@ -1151,7 +1548,7 @@
+ 				EXECUTABLE_NAME = ghostty;
+ 				GENERATE_INFOPLIST_FILE = YES;
+ 				INFOPLIST_FILE = "Ghostty-Info.plist";
+-				INFOPLIST_KEY_CFBundleDisplayName = "Ghostty[DEBUG]";
++				INFOPLIST_KEY_CFBundleDisplayName = Ghostty;
+ 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+ 				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within Ghostty would like to use AppleScript.";
+ 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within Ghostty would like to use Bluetooth.";
+@@ -1357,9 +1754,88 @@
+ 			};
+ 			name = ReleaseLocal;
+ 		};
++		C5E43F59EFD66B073D478596 /* Release */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				BUNDLE_LOADER = "$(TEST_HOST)";
++				GENERATE_INFOPLIST_FILE = YES;
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal.tests;
++				PRODUCT_MODULE_NAME = PromptTests;
++				PRODUCT_NAME = PromptTests;
++				SWIFT_VERSION = 5.0;
++				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Prompt.app/Contents/MacOS/Prompt";
++			};
++			name = Release;
++		};
++		FD7425C1E1F1D0204431269B /* Release */ = {
++			isa = XCBuildConfiguration;
++			buildSettings = {
++				ASSETCATALOG_COMPILER_APPICON_NAME = Ghostty;
++				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
++				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
++				CLANG_ENABLE_MODULES = YES;
++				CODE_SIGN_ENTITLEMENTS = Ghostty.entitlements;
++				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
++				CODE_SIGN_STYLE = Automatic;
++				COMBINE_HIDPI_IMAGES = YES;
++				CURRENT_PROJECT_VERSION = 1;
++				DEAD_CODE_STRIPPING = YES;
++				DEVELOPMENT_TEAM = "";
++				ENABLE_HARDENED_RUNTIME = YES;
++				ENABLE_PREVIEWS = YES;
++				EXECUTABLE_NAME = Prompt;
++				GCC_OPTIMIZATION_LEVEL = fast;
++				GENERATE_INFOPLIST_FILE = YES;
++				INFOPLIST_FILE = "Ghostty-Info.plist";
++				INFOPLIST_KEY_CFBundleDisplayName = Prompt;
++				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
++				INFOPLIST_KEY_NSAppleEventsUsageDescription = "A program running within Ghostty would like to use AppleScript.";
++				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "A program running within Ghostty would like to use Bluetooth.";
++				INFOPLIST_KEY_NSCalendarsUsageDescription = "A program running within Ghostty would like to access your Calendar.";
++				INFOPLIST_KEY_NSCameraUsageDescription = "A program running within Ghostty would like to use the camera.";
++				INFOPLIST_KEY_NSContactsUsageDescription = "A program running within Ghostty would like to access your Contacts.";
++				INFOPLIST_KEY_NSHumanReadableCopyright = "";
++				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "A program running within Ghostty would like to access the local network.";
++				INFOPLIST_KEY_NSLocationTemporaryUsageDescriptionDictionary = "A program running within Ghostty would like to use your location temporarily.";
++				INFOPLIST_KEY_NSLocationUsageDescription = "A program running within Ghostty would like to access your location information.";
++				INFOPLIST_KEY_NSMicrophoneUsageDescription = "A program running within Ghostty would like to use your microphone.";
++				INFOPLIST_KEY_NSMotionUsageDescription = "A program running within Ghostty would like to access motion data.";
++				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "A program running within Ghostty would like to access your Photo Library.";
++				INFOPLIST_KEY_NSRemindersUsageDescription = "A program running within Ghostty would like to access your reminders.";
++				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "A program running within Ghostty would like to use speech recognition.";
++				INFOPLIST_KEY_NSSystemAdministrationUsageDescription = "A program running within Ghostty requires elevated privileges.";
++				INFOPLIST_PREPROCESS = YES;
++				LD_RUNPATH_SEARCH_PATHS = (
++					"$(inherited)",
++					"@executable_path/../Frameworks",
++				);
++				MACOSX_DEPLOYMENT_TARGET = 13.0;
++				MARKETING_VERSION = 0.1;
++				"OTHER_LDFLAGS[arch=*]" = "-lstdc++";
++				PRODUCT_BUNDLE_IDENTIFIER = dev.prompt.terminal;
++				PRODUCT_MODULE_NAME = Prompt;
++				PRODUCT_NAME = Prompt;
++				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) PROMPT";
++				SWIFT_EMIT_LOC_STRINGS = YES;
++				SWIFT_OBJC_BRIDGING_HEADER = "Sources/App/macOS/ghostty-bridging-header.h";
++				SWIFT_VERSION = 5.0;
++			};
++			name = Release;
++		};
+ /* End XCBuildConfiguration section */
+ 
+ /* Begin XCConfigurationList section */
++		1EFB5B89F610A8D1F34402D7 /* Build configuration list for PBXNativeTarget "PromptTests" */ = {
++			isa = XCConfigurationList;
++			buildConfigurations = (
++				C5E43F59EFD66B073D478596 /* Release */,
++				023717283BF363B0F7E32EA1 /* Debug */,
++				79D0EB8773B0D7AEE4A70394 /* ReleaseLocal */,
++			);
++			defaultConfigurationIsVisible = 0;
++			defaultConfigurationName = Release;
++		};
+ 		810ACCA72E9D3302004F8F92 /* Build configuration list for PBXNativeTarget "GhosttyUITests" */ = {
+ 			isa = XCConfigurationList;
+ 			buildConfigurations = (
+@@ -1420,6 +1896,16 @@
+ 			defaultConfigurationIsVisible = 0;
+ 			defaultConfigurationName = ReleaseLocal;
+ 		};
++		B5260DF4A61CFCBE50CC125C /* Build configuration list for PBXNativeTarget "Prompt" */ = {
++			isa = XCConfigurationList;
++			buildConfigurations = (
++				FD7425C1E1F1D0204431269B /* Release */,
++				0B10C9553CF7B11EDEBBC096 /* Debug */,
++				0014762F65E8128289A07FC0 /* ReleaseLocal */,
++			);
++			defaultConfigurationIsVisible = 0;
++			defaultConfigurationName = Release;
++		};
+ /* End XCConfigurationList section */
+ 
+ /* Begin XCRemoteSwiftPackageReference section */
+@@ -1431,6 +1917,22 @@
+ 				minimumVersion = 2.5.1;
+ 			};
+ 		};
++		C0D3A0043D50000100A10001 /* XCRemoteSwiftPackageReference "MarkdownUI" */ = {
++			isa = XCRemoteSwiftPackageReference;
++			repositoryURL = "https://github.com/gonzalezreal/MarkdownUI.git";
++			requirement = {
++				kind = upToNextMajorVersion;
++				minimumVersion = 2.4.1;
++			};
++		};
++		C0D3A0063D50000100A10001 /* XCRemoteSwiftPackageReference "SwiftMath" */ = {
++			isa = XCRemoteSwiftPackageReference;
++			repositoryURL = "https://github.com/mgriebling/SwiftMath.git";
++			requirement = {
++				kind = upToNextMajorVersion;
++				minimumVersion = 1.7.3;
++			};
++		};
+ /* End XCRemoteSwiftPackageReference section */
+ 
+ /* Begin XCSwiftPackageProductDependency section */
+@@ -1439,6 +1941,16 @@
+ 			package = A51BFC252B30F1B700E92F16 /* XCRemoteSwiftPackageReference "Sparkle" */;
+ 			productName = Sparkle;
+ 		};
++		C0D3A0033D50000100A10001 /* MarkdownUI */ = {
++			isa = XCSwiftPackageProductDependency;
++			package = C0D3A0043D50000100A10001 /* XCRemoteSwiftPackageReference "MarkdownUI" */;
++			productName = MarkdownUI;
++		};
++		C0D3A0053D50000100A10001 /* SwiftMath */ = {
++			isa = XCSwiftPackageProductDependency;
++			package = C0D3A0063D50000100A10001 /* XCRemoteSwiftPackageReference "SwiftMath" */;
++			productName = SwiftMath;
++		};
+ /* End XCSwiftPackageProductDependency section */
+ 	};
+ 	rootObject = A5B30529299BEAAA0047F10C /* Project object */;
+diff --git a/macos/Ghostty.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved b/macos/Ghostty.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+index 6e450d9bcef86891aefcc925cc258a12900cc984..7b5a87fed4c059aaedd70c91b2c265920da9439f 100644
+--- a/macos/Ghostty.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
++++ b/macos/Ghostty.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+@@ -1,6 +1,24 @@
+ {
+-  "originHash" : "e721da7f9826abdffcb6185e886155efa2514bd6234475f1afa893e29eb258d6",
++  "originHash" : "89fb32b941d9253b82f6ee73913b1552ff8204ef7755d495218f596b08b2dab6",
+   "pins" : [
++    {
++      "identity" : "markdownui",
++      "kind" : "remoteSourceControl",
++      "location" : "https://github.com/gonzalezreal/MarkdownUI.git",
++      "state" : {
++        "revision" : "5f613358148239d0292c0cef674a3c2314737f9e",
++        "version" : "2.4.1"
++      }
++    },
++    {
++      "identity" : "networkimage",
++      "kind" : "remoteSourceControl",
++      "location" : "https://github.com/gonzalezreal/NetworkImage",
++      "state" : {
++        "revision" : "2849f5323265386e200484b0d0f896e73c3411b9",
++        "version" : "6.0.1"
++      }
++    },
+     {
+       "identity" : "sparkle",
+       "kind" : "remoteSourceControl",
+@@ -9,6 +27,24 @@
+         "revision" : "21d8df80440b1ca3b65fa82e40782f1e5a9e6ba2",
+         "version" : "2.9.0"
+       }
++    },
++    {
++      "identity" : "swift-cmark",
++      "kind" : "remoteSourceControl",
++      "location" : "https://github.com/swiftlang/swift-cmark",
++      "state" : {
++        "revision" : "924936d0427cb25a61169739a7660230bffa6ea6",
++        "version" : "0.8.0"
++      }
++    },
++    {
++      "identity" : "swiftmath",
++      "kind" : "remoteSourceControl",
++      "location" : "https://github.com/mgriebling/SwiftMath.git",
++      "state" : {
++        "revision" : "fa8244ed032f4a1ade4cb0571bf87d2f1a9fd2d7",
++        "version" : "1.7.3"
++      }
+     }
+   ],
+   "version" : 3
+diff --git a/macos/Sources/Ghostty/Ghostty.App.swift b/macos/Sources/Ghostty/Ghostty.App.swift
+index c52961ce5288fc27aaa1db2ee6faff658f704e37..b836e27ead8af0c5dc48c247a3ab819cde68b863 100644
+--- a/macos/Sources/Ghostty/Ghostty.App.swift
++++ b/macos/Sources/Ghostty/Ghostty.App.swift
+@@ -7,9 +7,19 @@ protocol GhosttyAppDelegate: AnyObject {
+     /// Called when a callback needs access to a specific surface. This should return nil
+     /// when the surface is no longer valid.
+     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView?
++
++    /// Embedded hosts may manage their own application lifecycle. Returning false
++    /// prevents a terminal-generated quit action from terminating the host process.
++    func ghosttyShouldTerminateApplication() -> Bool
+     #endif
+ }
+ 
++#if os(macOS)
++extension GhosttyAppDelegate {
++    func ghosttyShouldTerminateApplication() -> Bool { true }
++}
++#endif
++
+ extension Ghostty {
+     // IMPORTANT: THIS IS NOT DONE.
+     // This is a refactor/redo of Ghostty.AppState so that it supports both macOS and iOS
+@@ -46,10 +56,10 @@ extension Ghostty {
+             return ghostty_app_needs_confirm_quit(app)
+         }
+ 
+-        init(configPath: String? = nil) {
++        init(configPath: String? = nil, configDefaults: String? = nil) {
+             self.configPath = configPath
+             // Initialize the global configuration.
+-            self.config = Config(at: configPath)
++            self.config = Config(at: configPath, defaults: configDefaults)
+             if self.config.config == nil {
+                 readiness = .error
+                 return
+@@ -493,7 +503,12 @@ extension Ghostty {
+             // Action dispatch
+             switch action.tag {
+             case GHOSTTY_ACTION_QUIT:
++                #if PROMPT
++                logger.info("terminal-generated quit action ignored by Prompt")
++                return false
++                #else
+                 quit(app)
++                #endif
+ 
+             case GHOSTTY_ACTION_NEW_WINDOW:
+                 newWindow(app, target: target)
+@@ -695,6 +710,13 @@ extension Ghostty {
+             #endif
+ 
+             #if os(macOS)
++            if let userdata = ghostty_app_userdata(app) {
++                let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
++                guard state.delegate?.ghosttyShouldTerminateApplication() ?? true else {
++                    logger.info("quit request ignored by embedded application delegate")
++                    return
++                }
++            }
+             // We want to quit, start that process
+             NSApplication.shared.terminate(nil)
+             #endif
+@@ -1451,6 +1473,9 @@ extension Ghostty {
+             case GHOSTTY_TARGET_SURFACE:
+                 guard let surface = target.target.surface else { return }
+                 guard let surfaceView = self.surfaceView(from: surface) else { return }
++                MainActor.assumeIsolated {
++                    GhosttyAppKitHooks.commandDidFinish?(surfaceView, Int(v.exit_code), v.duration)
++                }
+ 
+                 // Determine if we even care about command finish notifications
+                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
+diff --git a/macos/Sources/Ghostty/Ghostty.Config.swift b/macos/Sources/Ghostty/Ghostty.Config.swift
+index d7134029d5ab540c5f6f00221a43624eac6ac119..a0c47f893abf0f80250e4ef6eed0801f88fed5f0 100644
+--- a/macos/Sources/Ghostty/Ghostty.Config.swift
++++ b/macos/Sources/Ghostty/Ghostty.Config.swift
+@@ -37,8 +37,8 @@ extension Ghostty {
+             self.config = config
+         }
+ 
+-        convenience init(at path: String? = nil, finalize: Bool = true) {
+-            self.init(config: Self.loadConfig(at: path, finalize: finalize))
++        convenience init(at path: String? = nil, defaults: String? = nil, finalize: Bool = true) {
++            self.init(config: Self.loadConfig(at: path, defaults: defaults, finalize: finalize))
+         }
+ 
+         convenience init(clone config: ghostty_config_t) {
+@@ -57,7 +57,7 @@ extension Ghostty {
+         /// - Parameters:
+         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
+         ///   - finalize: Whether to finalize the configuration to populate default values.
+-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
++        static func loadConfig(at path: String?, defaults: String? = nil, finalize: Bool) -> ghostty_config_t? {
+             // Initialize the global configuration.
+             guard let cfg = ghostty_config_new() else {
+                 logger.critical("ghostty_config_new failed")
+@@ -81,6 +81,12 @@ extension Ghostty {
+             }
+ 
+             ghostty_config_load_recursive_files(cfg)
++
++            if let defaults {
++                defaults.withCString {
++                    ghostty_config_load_string(cfg, $0, UInt(defaults.utf8.count), "/embedder/defaults")
++                }
++            }
+ #endif
+ 
+             // TODO: we'd probably do some config loading here... for now we'd
+diff --git a/macos/Sources/Ghostty/Surface View/SurfaceView.swift b/macos/Sources/Ghostty/Surface View/SurfaceView.swift
+index f6b30a7ad005a2fd36549c7448c5b1dcf8c04fe8..b964d0a537eabefcdb2f6ef6aa90e6910a0ff39f 100644
+--- a/macos/Sources/Ghostty/Surface View/SurfaceView.swift	
++++ b/macos/Sources/Ghostty/Surface View/SurfaceView.swift	
+@@ -3,6 +3,24 @@ import UserNotifications
+ import GhosttyKit
+ import System
+ 
++@_cdecl("ghostty_swift_manual_io_write")
++private func ghosttySwiftManualIOWrite(
++    _ userdata: UnsafeMutableRawPointer?,
++    _ bytes: UnsafePointer<CChar>?,
++    _ count: UInt
++) {
++    guard let userdata, let bytes, count > 0 else { return }
++    // AppKit delivers keyboard, mouse, and IME input on the main thread. A
++    // manual terminal may also emit protocol replies while parsing output
++    // (for example, device-attribute responses) on its terminal thread. Those
++    // replies already came from the authoritative terminal and must not be
++    // sent through the remote PTY a second time.
++    guard Thread.isMainThread else { return }
++    let data = Data(bytes: bytes, count: Int(count))
++    let view = Unmanaged<Ghostty.SurfaceView>.fromOpaque(userdata).takeUnretainedValue()
++    MainActor.assumeIsolated { view.manualIOWriteHandler?(data) }
++}
++
+ extension Ghostty {
+     /// Render a terminal for the active app in the environment.
+     struct Terminal: View {
+@@ -207,7 +225,25 @@ extension Ghostty {
+                 // This is disabled except on macOS because it uses AppKit drag/drop APIs.
+                 SurfaceGrabHandle(surfaceView: surfaceView)
+                 #endif
++
++                #if os(macOS)
++                if let overlay = GhosttyAppKitHooks.overlay?(surfaceView) {
++                    overlay
++                }
++                #endif
++            }
++            #if os(macOS)
++            .safeAreaInset(edge: .top, spacing: 0) {
++                if let topBar = GhosttyAppKitHooks.topBar?(surfaceView) {
++                    topBar
++                }
++            }
++            .safeAreaInset(edge: .bottom, spacing: 0) {
++                if let bottomBar = GhosttyAppKitHooks.bottomBar?(surfaceView) {
++                    bottomBar
++                }
+             }
++            #endif
+         }
+     }
+ 
+@@ -653,6 +689,11 @@ extension Ghostty {
+         /// Context for surface creation
+         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
+ 
++        /// Manual surfaces use Ghostty for VT state, rendering and input
++        /// encoding while an embedder owns the actual transport.
++        var ioMode: ghostty_surface_io_mode_e = GHOSTTY_SURFACE_IO_EXEC
++        var ioWriteHandler: ((Data) -> Void)?
++
+         init() {}
+ 
+         init(from config: ghostty_surface_config_s) {
+@@ -675,6 +716,7 @@ extension Ghostty {
+                 }
+             }
+             self.context = config.context
++            self.ioMode = config.io_mode
+         }
+ 
+         /// Provides a C-compatible ghostty configuration within a closure. The configuration
+@@ -711,6 +753,14 @@ extension Ghostty {
+             // Set context
+             config.context = context
+ 
++            // Set up embedder-owned IO. The SurfaceView owns the callback and
++            // is also Ghostty's stable userdata for the complete surface life.
++            config.io_mode = ioMode
++            if ioMode == GHOSTTY_SURFACE_IO_MANUAL {
++                config.io_write_cb = ghosttySwiftManualIOWrite
++                config.io_write_userdata = Unmanaged.passUnretained(view).toOpaque()
++            }
++
+             // Use withCString to ensure strings remain valid for the duration of the closure
+             return try workingDirectory.withCString { cWorkingDir in
+                 config.working_directory = cWorkingDir
+diff --git a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
+index 4fb156317228d3bbcff4a88247446081e41093a2..dacefef2758dad28c4f31ad807c8b3ce13094213 100644
+--- a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift	
++++ b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift	
+@@ -191,6 +191,10 @@ extension Ghostty {
+         // This is set to non-null during keyDown to accumulate insertText contents
+         private var keyTextAccumulator: [String]?
+ 
++        /// Receives input bytes encoded by a manual-IO surface. Prompt uses
++        /// this to forward presentation-surface input to an authoritative PTY.
++        var manualIOWriteHandler: ((Data) -> Void)?
++
+         // True when we've consumed a left mouse-down only to move focus and
+         // should suppress the matching mouse-up from being reported.
+         private var suppressNextLeftMouseUp: Bool = false
+@@ -239,6 +243,7 @@ extension Ghostty {
+             // is non-zero so that our layer bounds are non-zero so that our renderer
+             // can do SOMETHING.
+             super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
++            self.manualIOWriteHandler = baseConfig?.ioWriteHandler
+ 
+             // Our cache of screen data
+             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in
+@@ -388,6 +393,10 @@ extension Ghostty {
+         }
+ 
+         deinit {
++            MainActor.assumeIsolated {
++                GhosttyAppKitHooks.surfaceDidClose?(self)
++            }
++
+             // Remove all of our notificationcenter subscriptions
+             let center = NotificationCenter.default
+             center.removeObserver(self)
+@@ -901,6 +910,11 @@ extension Ghostty {
+ 
+             // Release pressure
+             ghostty_surface_mouse_pressure(surface, 0, 0)
++
++            // Give an embedding host a chance to reclaim keyboard focus after
++            // the complete mouse gesture. Selection and application mouse
++            // reporting still reach the terminal first.
++            GhosttyAppKitHooks.surfaceDidClick?(self)
+         }
+ 
+         override func otherMouseDown(with event: NSEvent) {
+@@ -1081,6 +1095,10 @@ extension Ghostty {
+                 return
+             }
+ 
++            if GhosttyAppKitHooks.keyDown?(self, event, markedText.length > 0) == true {
++                return
++            }
++
+             // On any keyDown event we unset our bell state
+             bell = false
+ 
+@@ -1724,6 +1742,7 @@ extension Ghostty {
+ 
+         @objc func resetTerminal(_ sender: Any) {
+             guard let surface = self.surface else { return }
++            GhosttyAppKitHooks.terminalDidReset?(self)
+             let action = "reset"
+             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
+diff --git a/src/Surface.zig b/src/Surface.zig
+index 41f7052ee00f809c3547be84e899f6a6c2d46379..12922e89cd9a56c6746e611ff355bab7afc8202b 100644
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -195,6 +195,19 @@ pub const InputEffect = enum {
+     closed,
+ };
+ 
++/// Give or take rendering ownership of the grid cursor. This does not modify
++/// the terminal's cursor-visible mode, so child applications retain their
++/// exact state while a native host composer is active.
++pub fn setHostCursorVisible(self: *Surface, visible: bool) void {
++    _ = self.renderer_thread.mailbox.push(
++        .{ .host_cursor_visible = visible },
++        .{ .forever = {} },
++    );
++    self.queueRender() catch |err| {
++        log.warn("failed to redraw host cursor visibility err={}", .{err});
++    };
++}
++
+ /// The search state for the surface.
+ const Search = struct {
+     state: terminal.search.Thread,
+@@ -944,6 +957,18 @@ fn queueIo(
+     self.io.queueMessage(msg, mutex);
+ }
+ 
++/// Queue bytes that have already been encoded as terminal input. Embedded
++/// composite renderers use this to connect a manual-IO presentation surface to
++/// the PTY owned by a second authoritative surface.
++pub fn writeInput(self: *Surface, data: []const u8) !void {
++    if (data.len == 0) return;
++    self.queueIo(try termio.Message.writeReq(self.alloc, data), .unlocked);
++
++    self.renderer_state.mutex.lock();
++    defer self.renderer_state.mutex.unlock();
++    try self.scrollToBottom();
++}
++
+ /// Forces the surface to render. This is useful for when the surface
+ /// is in the middle of animation (such as a resize, etc.) or when
+ /// the render timer is managed manually by the apprt.
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index 0176883117a3080c89077f88261139cd61b598d8..284633fab610c5d64d2cce1183b637d932045595 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -1880,6 +1880,50 @@ pub const CAPI = struct {
+         return readTextLocked(surface, core_sel, result);
+     }
+ 
++    /// Read the live command from OSC 133 input cells. The terminal remains
++    /// authoritative for editing, cursor motion, history, completion and IME.
++    export fn ghostty_surface_read_prompt_input(
++        surface: *Surface,
++        result: *Text,
++    ) bool {
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.mutex.lock();
++        defer core_surface.renderer_state.mutex.unlock();
++
++        const screen = core_surface.renderer_state.terminal.screens.active;
++        if (screen.cursor.semantic_content != .input and
++            screen.cursor.page_cell.semantic_content != .input) return false;
++
++        const cursor_pin = screen.cursor.page_pin.*;
++        const cells = cursor_pin.cells(.all);
++        var first: ?usize = null;
++        var last: ?usize = null;
++        for (cells, 0..) |cell, x| {
++            if (cell.semantic_content != .input) continue;
++            if (first == null) first = x;
++            last = x;
++        }
++
++        if (first == null) {
++            const empty = global.alloc.dupeZ(u8, "") catch return false;
++            result.* = .{
++                .tl_px_x = -1,
++                .tl_px_y = -1,
++                .offset_start = 0,
++                .offset_len = 0,
++                .text = empty.ptr,
++                .text_len = 0,
++            };
++            return true;
++        }
++
++        var tl = cursor_pin;
++        var br = cursor_pin;
++        tl.x = @intCast(first.?);
++        br.x = @intCast(last.?);
++        return readTextLocked(surface, terminal.Selection.init(tl, br, false), result);
++    }
++
+     /// cmux fork: read clipboard-formatted plain text from inclusive absolute
+     /// screen rows without mutating the active selection.
+     export fn ghostty_surface_read_screen_clipboard_text(
+@@ -2099,6 +2143,13 @@ pub const CAPI = struct {
+ 
+     /// Read current scrollbar geometry and its absolute row-space identity
+     /// directly from the terminal, independent of renderer publication.
++    export fn ghostty_surface_is_alternate_screen(surface: *Surface) bool {
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.lockDemand();
++        defer core_surface.renderer_state.unlockDemand();
++        return core_surface.renderer_state.terminal.screens.active_key == .alternate;
++    }
++
+     export fn ghostty_surface_scrollbar(
+         surface: *Surface,
+         result: *SurfaceScrollbar,
+@@ -3104,6 +3155,18 @@ pub const CAPI = struct {
+         surface.core_surface.io.processOutput(ptr[0..len]);
+     }
+ 
++    /// Write already-encoded input bytes to the surface backend.
++    export fn ghostty_surface_write_input(
++        surface: *Surface,
++        ptr: [*]const u8,
++        len: usize,
++    ) void {
++        if (len == 0) return;
++        surface.core_surface.writeInput(ptr[0..len]) catch |err| {
++            log.err("error writing encoded surface input err={}", .{err});
++        };
++    }
++
+     /// Install a callback that fires on every PTY-output byte slice
+     /// before the VT parser sees it. Pass `cb = null` to clear.
+     ///
+@@ -3214,6 +3277,14 @@ pub const CAPI = struct {
+         height.* = pos.height;
+     }
+ 
++    /// Controls renderer cursor ownership without changing DEC mode 25.
++    export fn ghostty_surface_set_host_cursor_visible(
++        surface: *Surface,
++        visible: bool,
++    ) void {
++        surface.core_surface.setHostCursorVisible(visible);
++    }
++
+     /// Request that the surface become closed. This will go through the
+     /// normal trigger process that a close surface input binding would.
+     export fn ghostty_surface_request_close(ptr: *Surface) void {
+diff --git a/src/renderer/Thread.zig b/src/renderer/Thread.zig
+index 321284988176aca509b0455a0645eaafb332028c..22e784d4de2d2650457a25784fa98d00c112fd88 100644
+--- a/src/renderer/Thread.zig
++++ b/src/renderer/Thread.zig
+@@ -774,6 +774,10 @@ fn drainMailbox(self: *Thread) !MailboxDrainResult {
+                 }
+             },
+ 
++            .host_cursor_visible => |visible| {
++                self.renderer.setHostCursorVisible(visible);
++            },
++
+             .font_grid => |grid| {
+                 self.renderer.setFontGrid(grid.grid);
+                 grid.set.deref(grid.old_key);
+diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
+index 1dfdd35c2641b29c8e60e5ebee431981ffc9ce14..1a3bd8659700e9b987836df97b1d1c68b98222a9 100644
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -258,6 +258,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+         /// The render state we update per loop.
+         terminal_state: terminal.RenderState = .empty,
+ 
++        /// Embedder-controlled cursor visibility. Native inline editors use
++        /// this to replace the grid caret without changing terminal modes.
++        host_cursor_visible: bool = true,
++
+         /// The number of frames since the last terminal state reset.
+         /// We reset the terminal state after ~100,000 frames (about 10 to
+         /// 15 minutes at 120Hz) to prevent wasted memory buildup from
+@@ -1296,6 +1300,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                     self.alloc,
+                     state.terminal,
+                 );
++                self.terminal_state.cursor.visible =
++                    self.terminal_state.cursor.visible and self.host_cursor_visible;
+ 
+                 // If our terminal state is dirty at all we need to redo
+                 // the viewport search.
+@@ -2051,6 +2057,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+             }
+         }
+ 
++        pub fn setHostCursorVisible(self: *Self, visible: bool) void {
++            if (self.host_cursor_visible == visible) return;
++            self.host_cursor_visible = visible;
++            self.terminal_state.dirty = .full;
++        }
++
+         /// Update only renderer colors for a manual-IO theme change.
+         pub fn changeColorConfig(self: *Self, config: *const configpkg.Config) void {
+             self.draw_mutex.lock();
+diff --git a/src/renderer/message.zig b/src/renderer/message.zig
+index 08306873ab93647dd05ec81c2c7b10d1f4fa4b21..585d07fbc085a7de5941e6138a3af0d418493b54 100644
+--- a/src/renderer/message.zig
++++ b/src/renderer/message.zig
+@@ -26,6 +26,11 @@ pub const Message = union(enum) {
+     /// restarting the timer.
+     reset_cursor_blink,
+ 
++    /// Whether the embedding application wants the terminal cursor rendered.
++    /// This is deliberately independent of DEC mode 25: native composers may
++    /// temporarily own text entry without mutating the child terminal state.
++    host_cursor_visible: bool,
++
+     /// Change the font grid. This can happen for any number of reasons
+     /// including a font size change, family change, etc.
+     font_grid: struct {
+-- 
+2.50.1 (Apple Git-155)
+
