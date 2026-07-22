@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+.tools/
+DerivedData/
+build/
+Artifacts/
+*.xcresult
+*.mov
+*.profraw
+.DS_Store
+Prompt-*.zip
+!Artifacts/*.mov
