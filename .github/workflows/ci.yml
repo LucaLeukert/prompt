@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test Prompt
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source and Ghostty submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.3.app
+          xcodebuild -version
+
+      - name: Install Zig
+        run: brew install zig@0.15
+
+      - name: Verify generated files are clean
+        run: |
+          ./Scripts/sync-ghostty.sh
+          git diff --check
+
+      - name: Build unsigned app
+        run: ./Scripts/build.sh
+
+      - name: Run Prompt tests
+        run: ./Scripts/test.sh
+
+      - name: Upload unsigned app for inspection
+        if: always() && hashFiles('DerivedData/Build/Products/Debug/Prompt.app/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prompt-unsigned-macos
+          path: DerivedData/Build/Products/Debug/Prompt.app
+          if-no-files-found: error
+          retention-days: 7

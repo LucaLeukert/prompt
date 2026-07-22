@@ -1,0 +1,61 @@
+name: Publish production build
+
+on:
+  push:
+    branches:
+      - production
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish unsigned macOS app
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source and Ghostty submodule
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_26.3.app
+          xcodebuild -version
+
+      - name: Install Zig
+        run: brew install zig@0.15
+
+      - name: Build unsigned app
+        run: ./Scripts/build.sh
+
+      - name: Package app
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            DerivedData/Build/Products/Debug/Prompt.app \
+            Prompt-unsigned-macos.zip
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: production-${{ github.run_number }}
+        run: |
+          gh release create "$TAG" Prompt-unsigned-macos.zip \
+            --target "$GITHUB_SHA" \
+            --title "Prompt production build $TAG" \
+            --notes "Unsigned macOS build from $GITHUB_SHA. macOS will show a Gatekeeper warning because this artifact is intentionally not code signed or notarized."
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Prompt-unsigned-macos-${{ github.run_number }}
+          path: Prompt-unsigned-macos.zip
+          if-no-files-found: error
+          retention-days: 30
