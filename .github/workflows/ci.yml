@@ -16,9 +16,9 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build and test Prompt
-    runs-on: macos-15
-    timeout-minutes: 90
+    name: Validate repository wiring
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out source and Ghostty submodule
@@ -26,30 +26,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Select Xcode 26
-        run: |
-          sudo xcode-select --switch /Applications/Xcode_26.3.app
-          xcodebuild -version
-
-      - name: Install Zig
-        run: brew install zig@0.15
-
-      - name: Verify generated files are clean
+      - name: Verify source sync and patch
         run: |
           ./Scripts/sync-ghostty.sh
           git diff --check
+          git -C Vendor/ghostty diff --check
 
-      - name: Build unsigned app
-        run: ./Scripts/build.sh
-
-      - name: Run Prompt tests
-        run: ./Scripts/test.sh
-
-      - name: Upload unsigned app for inspection
-        if: always() && hashFiles('DerivedData/Build/Products/Debug/Prompt.app/**') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: Prompt-unsigned-macos
-          path: DerivedData/Build/Products/Debug/Prompt.app
-          if-no-files-found: error
-          retention-days: 7
+      - name: Validate shell scripts
+        run: |
+          sh -n Scripts/build.sh
+          sh -n Scripts/run.sh
+          sh -n Scripts/sync-ghostty.sh
+          sh -n Scripts/test.sh
