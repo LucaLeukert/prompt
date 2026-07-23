@@ -377,7 +377,7 @@ private struct PromptSidebarSessionRow: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        ZStack(alignment: .topTrailing) {
             Button { store.focus(sessionID: session.id, paneID: session.focusedPaneID) } label: {
                 Group {
                     if let agentKind { agentRow(agentKind) } else { standardRow }
@@ -400,23 +400,27 @@ private struct PromptSidebarSessionRow: View {
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
 
-            if let pullRequest {
-                Link(destination: pullRequest.url) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.triangle.pull")
-                            .font(.system(size: 9, weight: .semibold))
-                        Text("#\(pullRequest.number)")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            if pullRequest != nil || shortcut != nil {
+                HStack(spacing: 7) {
+                    if let pullRequest {
+                        Link(destination: pullRequest.url) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.pull")
+                                    .font(.system(size: 9, weight: .semibold))
+                                Text("\(pullRequest.number)")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundStyle(pullRequestColor)
+                            .padding(.vertical, 3)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("\(pullRequest.title) · Open on GitHub")
                     }
-                    .foregroundStyle(pullRequestColor)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 3)
-                    .contentShape(Rectangle())
+                    if let shortcut { shortcutLabel }
                 }
-                .buttonStyle(.plain)
-                .help("\(pullRequest.title) · Open on GitHub")
                 .padding(.trailing, 8)
-                .padding(.bottom, 6)
+                .padding(.top, 9)
             }
         }
         .onHover {
@@ -478,8 +482,8 @@ private struct PromptSidebarSessionRow: View {
                     Text(displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                     Spacer(minLength: 4)
                     if isExecuting { ProgressView().controlSize(.mini) }
-                    if let shortcut { shortcutLabel }
                 }
+                .padding(.trailing, headerAccessoryInset)
                 if let context { Text(context).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
                 metadataLine
             }
@@ -502,14 +506,13 @@ private struct PromptSidebarSessionRow: View {
                         Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
                     }
                 }
-                if let shortcut { shortcutLabel }
             }
+            .padding(.trailing, headerAccessoryInset)
             HStack(spacing: 6) {
                 if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
                     Text(branch)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                         .lineLimit(1)
-                        .padding(.trailing, pullRequest == nil ? 0 : 38)
                 } else {
                     Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
                 }
@@ -527,6 +530,15 @@ private struct PromptSidebarSessionRow: View {
         case "MERGED": return Color.purple
         case "CLOSED": return Color.red
         default: return Color.green
+        }
+    }
+
+    private var headerAccessoryInset: CGFloat {
+        switch (pullRequest != nil, shortcut != nil) {
+        case (true, true): return 50
+        case (true, false): return 24
+        case (false, true): return 24
+        case (false, false): return 0
         }
     }
 
@@ -615,7 +627,6 @@ private struct PromptSidebarSessionRow: View {
             Text(metadata)
                 .font(.system(size: 10, design: .monospaced))
                 .lineLimit(1)
-                .padding(.trailing, pullRequest == nil ? 0 : 38)
             let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
             if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
         }.foregroundStyle(.tertiary)
