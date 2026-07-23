@@ -289,7 +289,7 @@ struct PromptAITests {
             prefix: "git checkout feat", completesAIInput: false))
         #expect(PromptAutocompleteModel.shouldComplete(
             prefix: "cat READ", completesAIInput: false))
-        #expect(PromptAutocompleteModel.shouldComplete(
+        #expect(!PromptAutocompleteModel.shouldComplete(
             prefix: "what is in read", completesAIInput: false))
         #expect(PromptAutocompleteModel.shouldComplete(
             prefix: "what is in read", completesAIInput: true))
@@ -492,6 +492,18 @@ struct PromptAITests {
         try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        #expect(ProjectResolver.resolve(from: nested.path) == root.path)
+    }
+
+    @Test func projectResolverRecognizesGitWorktreeFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "gitdir: /tmp/prompt-main/.git/worktrees/feature\n"
+            .write(to: root.appendingPathComponent(".git"), atomically: true, encoding: .utf8)
+        let nested = root.appendingPathComponent("Sources/Feature", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+
         #expect(ProjectResolver.resolve(from: nested.path) == root.path)
     }
 

@@ -5,7 +5,7 @@ import OSLog
 
 @MainActor
 final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
-    static let logger = Logger(subsystem: "dev.prompt.terminal", category: "application")
+    static let logger = Logger(subsystem: "net.leukert.prompt", category: "application")
 
     let runtime = PromptTerminalRuntime()
     lazy var workspaceStore = PromptWorkspaceStore(runtime: runtime)

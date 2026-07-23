@@ -108,7 +108,7 @@ struct PromptRemoteSession: Codable, Hashable {
 }
 
 @MainActor enum PromptSessionLauncher {
-    private static let logger = Logger(subsystem: "dev.prompt.terminal", category: "tailnet-discovery")
+    private static let logger = Logger(subsystem: "net.leukert.prompt", category: "tailnet-discovery")
     private static let savedKey = "PromptPersistentRemoteSessions"
     private static let tailnetSavedKey = "PromptDiscoveredTailnetHosts"
     private static var tailnetCache: (date: Date, hosts: [String])?
