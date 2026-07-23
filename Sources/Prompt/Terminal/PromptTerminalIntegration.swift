@@ -3,6 +3,8 @@ import SwiftUI
 
 @MainActor
 enum PromptTerminalIntegration {
+    private static var lastCodexInterruptAt: [ObjectIdentifier: Date] = [:]
+
     static func install() {
         GhosttyAppKitHooks.overlay = { view in
             let surface = PromptTerminalSurface.wrap(view)
@@ -72,6 +74,19 @@ enum PromptTerminalIntegration {
             if PromptModel.shared.cancelTerminalTurn(on: surface) { return true }
             if PromptTerminalCapabilities.isManagedRemote(surface) {
                 NotificationCenter.default.post(name: .promptRemoteControlC, object: surface)
+            } else if let runtime = (NSApp.delegate as? PromptApplicationDelegate)?.runtime,
+                      runtime.isLocalCodexSurface(surface) {
+                NotificationCenter.default.post(name: .promptRemoteControlC, object: surface)
+                let surfaceID = ObjectIdentifier(surface)
+                let now = Date()
+                let repeated = lastCodexInterruptAt[surfaceID].map {
+                    now.timeIntervalSince($0) < 1.5
+                } ?? false
+                // An idle Ctrl-C exits the Codex TUI. Only forward one when
+                // there is an active turn to interrupt, and absorb rapid
+                // repeats while the completion notification is in flight.
+                guard runtime.localCodexThread(for: surface)?.isWorking == true, !repeated else { return true }
+                lastCodexInterruptAt[surfaceID] = now
             }
         }
         if event.keyCode == 0x28, event.modifierFlags.contains(.command) {

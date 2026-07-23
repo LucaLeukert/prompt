@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Darwin
 
 /// Opt-in switches for functionality that is still being evaluated in real
 /// terminal sessions. Values are deliberately absent unless an experiment is
@@ -73,12 +74,483 @@ enum PromptTerminalCapabilities {
     }
 }
 
+/// A Codex TUI can be pointed at an app-server instead of starting its own
+/// private backend. Prompt transparently proxies that connection so the
+/// sidebar sees the authoritative thread events emitted for `/new` and
+/// `/resume`. Notifications are scoped to the owning client, so a separate
+/// observer connection cannot see them. This also avoids inferring the active
+/// thread from session history, which does not record the TUI's selection.
+private final class PromptCodexAgentObserver {
+    var onNotification: (([String: Any]) -> Void)?
+
+    private let socketPath: String
+    private let upstreamSocketPath: String
+    private var listener: Int32 = -1
+    private var acceptSource: DispatchSourceRead?
+    private var clientDescriptor: Int32 = -1
+    private var upstreamDescriptor: Int32 = -1
+    private var secondaryConnections: [Int32: Int32] = [:]
+    private var clientBuffer = Data()
+    private var serverBuffer = Data()
+    private var sentWebSocketHandshake = false
+    private var receivedWebSocketHandshake = false
+    private var pendingThreadRequestIDs: Set<String> = []
+    private let queue = DispatchQueue(label: "dev.prompt.codex-sidebar-observer")
+
+    init(socketPath: String, upstreamSocketPath: String) {
+        self.socketPath = socketPath
+        self.upstreamSocketPath = upstreamSocketPath
+    }
+
+    func start() -> Bool {
+        try? FileManager.default.removeItem(atPath: socketPath)
+        let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0, bindSocket(descriptor, to: socketPath), Darwin.listen(descriptor, 1) == 0 else {
+            if descriptor >= 0 { Darwin.close(descriptor) }
+            return false
+        }
+        listener = descriptor
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+        source.setEventHandler { [weak self] in self?.acceptClient() }
+        source.setCancelHandler { Darwin.close(descriptor) }
+        acceptSource = source
+        source.resume()
+        return true
+    }
+
+    func stop() {
+        stopConnection()
+        acceptSource?.cancel()
+        acceptSource = nil
+        listener = -1
+        try? FileManager.default.removeItem(atPath: socketPath)
+    }
+
+    private func acceptClient() {
+        let client = Darwin.accept(listener, nil, nil)
+        guard client >= 0 else { return }
+        let upstream = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard upstream >= 0, connectSocket(upstream, to: upstreamSocketPath) else {
+            Darwin.close(client)
+            if upstream >= 0 { Darwin.close(upstream) }
+            return
+        }
+
+        let observesTraffic = clientDescriptor < 0
+        if observesTraffic {
+            clientDescriptor = client
+            upstreamDescriptor = upstream
+        } else {
+            secondaryConnections[client] = upstream
+        }
+        Thread.detachNewThread { [weak self] in
+            self?.relay(client: client, upstream: upstream, observesTraffic: observesTraffic)
+        }
+    }
+
+    private func stopConnection() {
+        let client = clientDescriptor
+        let upstream = upstreamDescriptor
+        clientDescriptor = -1
+        upstreamDescriptor = -1
+        if client >= 0 {
+            Darwin.shutdown(client, SHUT_RDWR)
+            Darwin.close(client)
+        }
+        if upstream >= 0 {
+            Darwin.shutdown(upstream, SHUT_RDWR)
+            Darwin.close(upstream)
+        }
+        let secondary = secondaryConnections
+        secondaryConnections.removeAll()
+        for (client, upstream) in secondary {
+            Darwin.shutdown(client, SHUT_RDWR)
+            Darwin.close(client)
+            Darwin.shutdown(upstream, SHUT_RDWR)
+            Darwin.close(upstream)
+        }
+        serverBuffer.removeAll(keepingCapacity: true)
+        clientBuffer.removeAll(keepingCapacity: true)
+        pendingThreadRequestIDs.removeAll()
+        sentWebSocketHandshake = false
+        receivedWebSocketHandshake = false
+    }
+
+    private func relay(client: Int32, upstream: Int32, observesTraffic: Bool) {
+        var bytes = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            var polls = [
+                pollfd(fd: client, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: upstream, events: Int16(POLLIN), revents: 0),
+            ]
+            let ready = Darwin.poll(&polls, nfds_t(polls.count), -1)
+            guard ready > 0 else {
+                if errno == EINTR { continue }
+                break
+            }
+            for (index, source, destination, observesServer) in [
+                (0, client, upstream, false),
+                (1, upstream, client, true),
+            ] where polls[index].revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
+                let count = bytes.withUnsafeMutableBytes { buffer in
+                    Darwin.read(source, buffer.baseAddress, buffer.count)
+                }
+                guard count > 0 else {
+                    finishConnection(client: client, upstream: upstream)
+                    return
+                }
+                let data = Data(bytes.prefix(count))
+                guard writeAll(data, to: destination) else {
+                    finishConnection(client: client, upstream: upstream)
+                    return
+                }
+                if observesTraffic {
+                    if observesServer { consumeServerData(data) }
+                    else { consumeClientData(data) }
+                }
+            }
+        }
+        finishConnection(client: client, upstream: upstream)
+    }
+
+    private func writeAll(_ data: Data, to descriptor: Int32) -> Bool {
+        data.withUnsafeBytes { rawBuffer in
+            guard var address = rawBuffer.baseAddress else { return true }
+            var remaining = rawBuffer.count
+            while remaining > 0 {
+                let written = Darwin.write(descriptor, address, remaining)
+                if written < 0, errno == EINTR { continue }
+                guard written > 0 else { return false }
+                remaining -= written
+                address = address.advanced(by: written)
+            }
+            return true
+        }
+    }
+
+    private func finishConnection(client: Int32, upstream: Int32) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if clientDescriptor == client, upstreamDescriptor == upstream {
+                stopConnection()
+            } else if secondaryConnections.removeValue(forKey: client) == upstream {
+                Darwin.shutdown(client, SHUT_RDWR)
+                Darwin.close(client)
+                Darwin.shutdown(upstream, SHUT_RDWR)
+                Darwin.close(upstream)
+            }
+        }
+    }
+
+    private func bindSocket(_ descriptor: Int32, to path: String) -> Bool {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8CString)
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+            return false
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            destination.initializeMemory(as: UInt8.self, repeating: 0)
+            bytes.withUnsafeBytes { source in destination.copyBytes(from: source) }
+        }
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        } == 0
+    }
+
+    private func connectSocket(_ descriptor: Int32, to path: String) -> Bool {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8CString)
+        guard bytes.count <= MemoryLayout.size(ofValue: address.sun_path) else { return false }
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            destination.initializeMemory(as: UInt8.self, repeating: 0)
+            bytes.withUnsafeBytes { source in destination.copyBytes(from: source) }
+        }
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        } == 0
+    }
+
+    private func consumeServerData(_ data: Data) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            serverBuffer.append(data)
+            if !receivedWebSocketHandshake {
+                let terminator = Data("\r\n\r\n".utf8)
+                guard let range = serverBuffer.range(of: terminator) else { return }
+                serverBuffer.removeSubrange(serverBuffer.startIndex ..< range.upperBound)
+                receivedWebSocketHandshake = true
+            }
+            while let payload = nextWebSocketPayload(from: &serverBuffer) {
+                guard let value = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+                    continue
+                }
+                if value["method"] != nil {
+                    DispatchQueue.main.async { self.onNotification?(value) }
+                } else if let id = CodexAppServer.stringID(value["id"]),
+                          pendingThreadRequestIDs.remove(id) != nil,
+                          let result = value["result"] as? [String: Any],
+                          let thread = result["thread"] as? [String: Any] {
+                    DispatchQueue.main.async {
+                        var params: [String: Any] = ["thread": thread]
+                        if let model = result["model"] as? String { params["model"] = model }
+                        if let effort = result["reasoningEffort"] as? String { params["reasoningEffort"] = effort }
+                        self.onNotification?(["method": "thread/started", "params": params])
+                    }
+                }
+            }
+        }
+    }
+
+    private func consumeClientData(_ data: Data) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            clientBuffer.append(data)
+            if !sentWebSocketHandshake {
+                let terminator = Data("\r\n\r\n".utf8)
+                guard let range = clientBuffer.range(of: terminator) else { return }
+                clientBuffer.removeSubrange(clientBuffer.startIndex ..< range.upperBound)
+                sentWebSocketHandshake = true
+            }
+            while let payload = nextWebSocketPayload(from: &clientBuffer) {
+                guard let value = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
+                      let method = value["method"] as? String else { continue }
+                if ["thread/start", "thread/resume", "thread/fork"].contains(method),
+                   let id = CodexAppServer.stringID(value["id"]) {
+                    pendingThreadRequestIDs.insert(id)
+                } else if method == "turn/start",
+                          let params = value["params"] as? [String: Any],
+                          let threadID = params["threadId"] as? String,
+                          let model = params["model"] as? String {
+                    var update: [String: Any] = ["threadId": threadID, "model": model]
+                    if let effort = (params["effort"] as? String) ?? (params["reasoningEffort"] as? String) {
+                        update["reasoningEffort"] = effort
+                    }
+                    DispatchQueue.main.async {
+                        self.onNotification?([
+                            "method": "thread/model/updated",
+                            "params": update,
+                        ])
+                    }
+                }
+            }
+        }
+    }
+
+    private func nextWebSocketPayload(from buffer: inout Data) -> Data? {
+        guard buffer.count >= 2 else { return nil }
+        let bytes = [UInt8](buffer.prefix(10))
+        let opcode = bytes[0] & 0x0F
+        let masked = bytes[1] & 0x80 != 0
+        var payloadLength = Int(bytes[1] & 0x7F)
+        var headerLength = 2
+        if payloadLength == 126 {
+            guard buffer.count >= 4 else { return nil }
+            payloadLength = Int(bytes[2]) << 8 | Int(bytes[3])
+            headerLength = 4
+        } else if payloadLength == 127 {
+            guard buffer.count >= 10 else { return nil }
+            let length = bytes[2 ..< 10].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            guard length <= UInt64(Int.max) else { return nil }
+            payloadLength = Int(length)
+            headerLength = 10
+        }
+        let maskLength = masked ? 4 : 0
+        guard buffer.count >= headerLength + maskLength + payloadLength else { return nil }
+        let mask = masked ? [UInt8](buffer[headerLength ..< (headerLength + 4)]) : []
+        let payloadStart = headerLength + maskLength
+        var payload = Data(buffer[payloadStart ..< (payloadStart + payloadLength)])
+        buffer.removeSubrange(0 ..< (payloadStart + payloadLength))
+        if masked {
+            for index in payload.indices { payload[index] ^= mask[index % 4] }
+        }
+        // Codex 0.145 sends JSON-RPC as binary WebSocket messages over Unix
+        // sockets, while older builds used text messages.
+        return opcode == 0x1 || opcode == 0x2 ? payload : Data()
+    }
+}
+
+private extension PromptCodexAgentObserver {
+    /// App-server notifications are scoped to the client connection that owns
+    /// the TUI thread. Acting as a transparent proxy lets Prompt observe that
+    /// exact stream; opening a second client only sees its own empty state.
+    func waitForUpstreamAndStart() -> Bool {
+        let deadline = Date().addingTimeInterval(1)
+        while !FileManager.default.fileExists(atPath: upstreamSocketPath), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        guard FileManager.default.fileExists(atPath: upstreamSocketPath) else { return false }
+        return start()
+    }
+}
+
+private final class PromptCodexAgentBridge {
+    var onThreadUpdate: ((PromptTerminalRuntime.SidebarCodexThread) -> Void)? {
+        didSet {
+            if let thread { onThreadUpdate?(thread) }
+        }
+    }
+
+    private let executable: String
+    private let socketDirectory: String
+    private let socketPath: String
+    private let upstreamSocketPath: String
+    private let launcherPath: String
+    private let server = Process()
+    private let observer: PromptCodexAgentObserver
+    private var thread: PromptTerminalRuntime.SidebarCodexThread?
+
+    init?(paneID: PromptPane.ID, workingDirectory: String) {
+        guard FileManager.default.isExecutableFile(atPath: PromptAgentCommand.codex) else { return nil }
+        executable = PromptAgentCommand.codex
+        socketDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/prompt/codex-\(paneID.uuidString)", isDirectory: true).path
+        socketPath = "\(socketDirectory)/proxy.sock"
+        upstreamSocketPath = "\(socketDirectory)/server.sock"
+        launcherPath = "\(socketDirectory)/launch.command"
+        observer = PromptCodexAgentObserver(socketPath: socketPath, upstreamSocketPath: upstreamSocketPath)
+        observer.onNotification = { [weak self] notification in self?.consume(notification) }
+
+        try? FileManager.default.removeItem(atPath: socketDirectory)
+        guard (try? FileManager.default.createDirectory(
+            atPath: socketDirectory, withIntermediateDirectories: true)) != nil else { return nil }
+        let launcher = """
+        #!/bin/sh
+        exec \(Self.shellQuote(executable)) -C \(Self.shellQuote(workingDirectory)) \
+        --remote \(Self.shellQuote("unix://\(socketPath)"))
+        """
+        guard (try? launcher.write(toFile: launcherPath, atomically: true, encoding: .utf8)) != nil,
+              Darwin.chmod(launcherPath, S_IRWXU) == 0 else { return nil }
+        server.executableURL = URL(fileURLWithPath: executable)
+        server.arguments = ["app-server", "--listen", "unix://\(upstreamSocketPath)"]
+        server.standardOutput = FileHandle.nullDevice
+        server.standardError = FileHandle.nullDevice
+        server.terminationHandler = { [weak self] _ in self?.observer.stop() }
+        do { try server.run() } catch { return nil }
+
+        guard observer.waitForUpstreamAndStart() else {
+            server.terminate()
+            return nil
+        }
+    }
+
+    deinit { stop() }
+
+    var command: String {
+        launcherPath
+    }
+
+    func stop() {
+        observer.stop()
+        if server.isRunning { server.terminate() }
+        try? FileManager.default.removeItem(atPath: socketDirectory)
+    }
+
+    private func consume(_ notification: [String: Any]) {
+        guard let method = notification["method"] as? String,
+              let params = notification["params"] as? [String: Any] else { return }
+        switch method {
+        case "thread/started":
+            guard let value = params["thread"] as? [String: Any],
+                  let id = value["id"] as? String else { return }
+            let name = (value["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = (value["preview"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = name?.isEmpty == false ? name! : (preview?.isEmpty == false ? preview! : "New Codex thread")
+            let updated = (value["updatedAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? Date()
+            let status = (value["status"] as? [String: Any])?["type"] as? String
+            let existing = thread?.id == id ? thread : nil
+            publish(.init(
+                id: id,
+                title: title,
+                updatedAt: updated,
+                isWorking: status == "active",
+                model: params["model"] as? String ?? existing?.model,
+                reasoningEffort: params["reasoningEffort"] as? String ?? existing?.reasoningEffort))
+
+        case "thread/name/updated":
+            guard let id = params["threadId"] as? String,
+                  let name = params["threadName"] as? String,
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  thread?.id == id, let thread else { return }
+            publish(.init(id: id, title: name, updatedAt: Date(), isWorking: thread.isWorking, model: thread.model, reasoningEffort: thread.reasoningEffort))
+
+        case "thread/status/changed":
+            guard let id = params["threadId"] as? String,
+                  let thread, thread.id == id else { return }
+            let active = ((params["status"] as? [String: Any])?["type"] as? String) == "active"
+            publish(.init(id: id, title: thread.title, updatedAt: Date(), isWorking: active, model: thread.model, reasoningEffort: thread.reasoningEffort))
+
+        case "turn/started", "turn/completed":
+            guard let id = params["threadId"] as? String,
+                  let thread, thread.id == id else { return }
+            publish(.init(id: id, title: thread.title, updatedAt: Date(), isWorking: method == "turn/started", model: thread.model, reasoningEffort: thread.reasoningEffort))
+
+        case "thread/model/updated":
+            guard let id = params["threadId"] as? String,
+                  let model = params["model"] as? String,
+                  let thread, thread.id == id else { return }
+            publish(.init(
+                id: id,
+                title: thread.title,
+                updatedAt: Date(),
+                isWorking: thread.isWorking,
+                model: model,
+                reasoningEffort: params["reasoningEffort"] as? String ?? thread.reasoningEffort))
+
+        case "item/started", "item/completed":
+            guard let id = params["threadId"] as? String,
+                  let thread, thread.id == id,
+                  let item = params["item"] as? [String: Any],
+                  item["type"] as? String == "userMessage",
+                  let content = item["content"] as? [[String: Any]] else { return }
+            let prompt = content.compactMap { $0["text"] as? String }
+                .joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return }
+            publish(.init(
+                id: id,
+                title: prompt,
+                updatedAt: Date(),
+                isWorking: thread.isWorking,
+                model: thread.model,
+                reasoningEffort: thread.reasoningEffort))
+
+        default:
+            break
+        }
+    }
+
+    private func publish(_ value: PromptTerminalRuntime.SidebarCodexThread) {
+        thread = value
+        onThreadUpdate?(value)
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "'\\\"'\\\"'"))'"
+    }
+}
+
 @MainActor
 final class PromptTerminalRuntime: ObservableObject {
     struct SidebarPullRequest: Equatable {
         let number: Int
         let title: String
         let isDraft: Bool
+        let state: String
+        let url: URL
+    }
+    struct SidebarCodexThread: Equatable {
+        let id: String
+        let title: String
+        let updatedAt: Date
+        let isWorking: Bool
+        let model: String?
+        let reasoningEffort: String?
     }
     struct RemotePaneDescriptor: Equatable {
         let id: String
@@ -131,7 +603,10 @@ final class PromptTerminalRuntime: ObservableObject {
     @Published private(set) var localPaneCommands: [PromptPane.ID: String] = [:]
     @Published private(set) var localPullRequests: [PromptPane.ID: SidebarPullRequest] = [:]
     @Published private(set) var localCommandStartedAt: [PromptPane.ID: Date] = [:]
+    @Published private(set) var localCodexThreads: [PromptPane.ID: SidebarCodexThread] = [:]
     private var localStatusTasks: [PromptPane.ID: Task<Void, Never>] = [:]
+    private var localCodexPaneIDs: Set<PromptPane.ID> = []
+    private var codexBridges: [PromptPane.ID: PromptCodexAgentBridge] = [:]
     private var commandObservers: [NSObjectProtocol] = []
     private var pullRequestRefreshes: [PromptPane.ID: Date] = [:]
 
@@ -176,6 +651,9 @@ final class PromptTerminalRuntime: ObservableObject {
                           let paneID = self.surfaces.first(where: { $0.value === surface })?.key else { return }
                     self.localPaneCommands[paneID] = command
                     self.localCommandStartedAt[paneID] = Date()
+                    if command.lowercased().contains("codex") {
+                        self.localCodexPaneIDs.insert(paneID)
+                    }
                 },
             NotificationCenter.default.addObserver(
                 forName: .ghosttyCommandDidFinish, object: nil, queue: .main) { [weak self] note in
@@ -192,12 +670,27 @@ final class PromptTerminalRuntime: ObservableObject {
         let surface: PromptTerminalSurface
         switch configuration {
         case .local(let local):
+            let isCodexAgent = local.command?.lowercased().contains("codex") == true
+            let bridge = isCodexAgent
+                ? PromptCodexAgentBridge(paneID: pane.id, workingDirectory: local.workingDirectory)
+                : nil
             let adapterConfig = GhosttyAppKitSurfaceConfiguration(
                 workingDirectory: local.workingDirectory,
-                command: local.command,
+                command: bridge?.command ?? local.command,
                 initialInput: nil)
             guard let hosted = application.makeSurface(configuration: adapterConfig) else { return nil }
             surface = PromptTerminalSurface.wrap(hosted.hostedView)
+            if let bridge {
+                // The TUI can start its thread while makeSurface is still
+                // returning. Register the bridge before installing the
+                // callback, because the callback immediately replays that
+                // already-observed thread.
+                codexBridges[pane.id] = bridge
+                bridge.onThreadUpdate = { [weak self, weak bridge] thread in
+                    guard let self, self.codexBridges[pane.id] === bridge else { return }
+                    self.localCodexThreads[pane.id] = thread
+                }
+            }
 
         case .remote(let remote) where remote.transport == .controlMode:
             let router = PromptCompositeIORouter()
@@ -234,12 +727,27 @@ final class PromptTerminalRuntime: ObservableObject {
             remoteConfigurations[pane.id] = remote
             if let tmuxPaneID = remote.tmuxPaneID { remoteTmuxPaneIDs[pane.id] = tmuxPaneID }
             monitorRemotePane(pane.id, configuration: remote, surface: surface)
-        case .local: monitorLocalPane(pane.id, surface: surface)
+        case .local(let local):
+            if local.command?.lowercased().contains("codex") == true {
+                localCodexPaneIDs.insert(pane.id)
+            }
+            monitorLocalPane(pane.id, surface: surface, configuredDirectory: local.workingDirectory)
         }
         return surface
     }
 
     func surface(for paneID: PromptPane.ID) -> PromptTerminalSurface? { surfaces[paneID] }
+
+    func localCodexThread(for surface: PromptTerminalSurface) -> SidebarCodexThread? {
+        guard let paneID = surfaces.first(where: { $0.value === surface })?.key,
+              codexBridges[paneID] != nil else { return nil }
+        return localCodexThreads[paneID]
+    }
+
+    func isLocalCodexSurface(_ surface: PromptTerminalSurface) -> Bool {
+        guard let paneID = surfaces.first(where: { $0.value === surface })?.key else { return false }
+        return codexBridges[paneID] != nil
+    }
 
     func close(paneID: PromptPane.ID, terminateRemotePane: Bool = false) {
         if terminateRemotePane,
@@ -258,6 +766,9 @@ final class PromptTerminalRuntime: ObservableObject {
         localPaneCommands.removeValue(forKey: paneID)
         localPullRequests.removeValue(forKey: paneID)
         localCommandStartedAt.removeValue(forKey: paneID)
+        localCodexThreads.removeValue(forKey: paneID)
+        localCodexPaneIDs.remove(paneID)
+        codexBridges.removeValue(forKey: paneID)?.stop()
         pullRequestRefreshes.removeValue(forKey: paneID)
         if let surface = surfaces.removeValue(forKey: paneID) {
             PromptTerminalCapabilities.unregister(surface)
@@ -333,12 +844,12 @@ final class PromptTerminalRuntime: ObservableObject {
         }
     }
 
-    private func monitorLocalPane(_ paneID: PromptPane.ID, surface: PromptTerminalSurface) {
+    private func monitorLocalPane(_ paneID: PromptPane.ID, surface: PromptTerminalSurface, configuredDirectory: String) {
         localStatusTasks[paneID]?.cancel()
         localStatusTasks[paneID] = Task { [weak self, weak surface] in
             while !Task.isCancelled {
-                if let directory = surface?.workingDirectory,
-                   let branch = await Self.fetchLocalGitBranch(directory) {
+                let directory = surface?.workingDirectory ?? configuredDirectory
+                if let branch = await Self.fetchLocalGitBranch(directory) {
                     self?.localGitBranches[paneID] = branch
                     let refreshDue = self?.pullRequestRefreshes[paneID].map { Date().timeIntervalSince($0) > 20 } ?? true
                     if refreshDue {
@@ -382,7 +893,7 @@ final class PromptTerminalRuntime: ObservableObject {
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = ["pr", "view", "--head", branch, "--json", "number,title,isDraft,state"]
+            process.arguments = ["pr", "view", branch, "--json", "number,title,isDraft,state,url"]
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
@@ -392,8 +903,15 @@ final class PromptTerminalRuntime: ObservableObject {
                   let object = try? JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any],
                   let number = object["number"] as? Int,
                   let title = object["title"] as? String,
-                  (object["state"] as? String) == "OPEN" else { return nil }
-            return SidebarPullRequest(number: number, title: title, isDraft: object["isDraft"] as? Bool ?? false)
+                  let state = object["state"] as? String,
+                  let urlString = object["url"] as? String,
+                  let url = URL(string: urlString) else { return nil }
+            return SidebarPullRequest(
+                number: number,
+                title: title,
+                isDraft: object["isDraft"] as? Bool ?? false,
+                state: state,
+                url: url)
         }.value
     }
 
