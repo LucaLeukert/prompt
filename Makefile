@@ -5,6 +5,7 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 GHOSTTY := $(ROOT)/Vendor/ghostty
 PROJECT := $(GHOSTTY)/macos/Ghostty.xcodeproj
 CONFIGURATION ?= Debug
+XCFRAMEWORK_TARGET ?= $(if $(filter Debug,$(CONFIGURATION)),native,universal)
 DERIVED_DATA := $(ROOT)/DerivedData
 ARTIFACT_DIR := $(ROOT)/Artifacts/$(CONFIGURATION)
 APP := $(ARTIFACT_DIR)/Prompt.app
@@ -60,7 +61,7 @@ prepare: sync
 	cd "$(GHOSTTY)"; \
 	env -u SWIFT_DEBUG_INFORMATION_FORMAT -u SWIFT_DEBUG_INFORMATION_VERSION \
 	"$(ZIG)" build -Demit-xcframework=true -Demit-macos-app=false \
-		-Dxcframework-target=native; \
+		-Dxcframework-target="$(XCFRAMEWORK_TARGET)"; \
 	if [ ! -d "$(GHOSTTY)/zig-out/share/terminfo" ]; then \
 		if [ ! -d "/Applications/Ghostty.app/Contents/Resources" ]; then \
 			echo "Ghostty resources are missing; install Ghostty.app once to seed them." >&2; \
@@ -71,6 +72,7 @@ prepare: sync
 	fi
 
 build: prepare
+	rm -rf "$(APP)" "$(APP).dSYM"
 	xcodebuild \
 		-project "$(PROJECT)" \
 		-scheme Prompt \

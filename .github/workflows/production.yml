@@ -31,16 +31,16 @@ jobs:
       - name: Install Zig
         run: brew install zig@0.15
 
-      - name: Build unsigned app
-        run: ./Scripts/build.sh
-
       - name: Run Prompt tests
-        run: ./Scripts/test.sh
+        run: make test
+
+      - name: Build unsigned Release app
+        run: make build CONFIGURATION=Release
 
       - name: Package app
         run: |
           ditto -c -k --sequesterRsrc --keepParent \
-            DerivedData/Build/Products/Debug/Prompt.app \
+            Artifacts/Release/Prompt.app \
             Prompt-unsigned-macos.zip
 
       - name: Publish GitHub Release
