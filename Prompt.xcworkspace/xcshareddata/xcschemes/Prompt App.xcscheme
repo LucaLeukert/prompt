@@ -10,7 +10,7 @@
             ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
             <ActionContent
                title = "Prepare Prompt and Ghostty"
-               scriptText = "cd &quot;$SRCROOT/../../..&quot;&#10;exec /usr/bin/make prepare&#10;">
+               scriptText = "cd &quot;$SRCROOT/../../..&quot;&#10;exec /usr/bin/make prepare CONFIGURATION=&quot;$CONFIGURATION&quot;&#10;">
                <EnvironmentBuildable>
                   <BuildableReference
                      BuildableIdentifier = "primary"

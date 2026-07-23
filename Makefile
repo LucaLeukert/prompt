@@ -10,7 +10,7 @@ DERIVED_DATA := $(ROOT)/DerivedData
 ARTIFACT_DIR := $(ROOT)/Artifacts/$(CONFIGURATION)
 APP := $(ARTIFACT_DIR)/Prompt.app
 EXECUTABLE := $(APP)/Contents/MacOS/Prompt
-ZIG := /opt/homebrew/opt/zig@0.15/bin/zig
+ZIG := $(shell brew --prefix zig@0.15 2>/dev/null)/bin/zig
 
 .PHONY: help build run test lint format lint-install xcode clean prepare sync check-app
 
