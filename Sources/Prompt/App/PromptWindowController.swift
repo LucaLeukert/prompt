@@ -12,6 +12,15 @@ enum PromptTheme {
     static let accent = Color(red: 0.063, green: 0.639, blue: 0.498)
 }
 
+enum PromptKeyboardFocusRouting {
+    @MainActor
+    static func preservesEditableControl(_ responder: NSResponder?) -> Bool {
+        if let textView = responder as? NSTextView { return textView.isEditable }
+        if let textField = responder as? NSTextField { return textField.isEditable && textField.isEnabled }
+        return false
+    }
+}
+
 /// Keeps AppKit's responder chain aligned with Prompt's input model.
 ///
 /// Ghostty surfaces are native AppKit views embedded in SwiftUI. SwiftUI can
@@ -35,12 +44,14 @@ private final class PromptWindow: NSWindow {
             // have no text field. Their local monitors handle navigation; do
             // not let any unhandled characters fall through to the terminal.
             guard focusPaletteInputIfAvailable() else { return }
-        } else if let session = workspaceStore.workspace.sessions.first(where: {
+        } else if !PromptKeyboardFocusRouting.preservesEditableControl(firstResponder),
+                  let session = workspaceStore.workspace.sessions.first(where: {
             $0.id == workspaceStore.workspace.focusedSessionID
         }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
             // Application shortcuts are consumed by the local shortcut router
-            // before they arrive here. Every remaining key belongs to the
-            // active terminal, even if a SwiftUI control was clicked earlier.
+            // before they arrive here. Reclaim terminal focus after sidebar
+            // interactions, but preserve SwiftUI's field editor while a
+            // composer or command-bar field owns keyboard input.
             surface.focus()
         }
 

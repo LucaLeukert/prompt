@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import Combine
 @testable import Prompt
 
@@ -18,6 +19,24 @@ final class PromptModelTests: XCTestCase {
         XCTAssertEqual(workspace.focusedSessionID, second.id)
         workspace.removeSession(id: second.id)
         XCTAssertEqual(workspace.focusedSessionID, first.id)
+    }
+
+    @MainActor
+    func testTerminalFocusRoutingPreservesEditableTextControls() {
+        let textView = NSTextView()
+        textView.isEditable = true
+        XCTAssertTrue(PromptKeyboardFocusRouting.preservesEditableControl(textView))
+        textView.isEditable = false
+        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(textView))
+
+        let textField = NSTextField()
+        textField.isEditable = true
+        textField.isEnabled = true
+        XCTAssertTrue(PromptKeyboardFocusRouting.preservesEditableControl(textField))
+        textField.isEnabled = false
+        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(textField))
+
+        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(NSButton()))
     }
 
     @MainActor
