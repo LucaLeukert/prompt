@@ -211,6 +211,19 @@ struct PromptAITests {
         #expect(PromptTerminalTool.available(in: .assistant, isRemote: false) == PromptTerminalTool.available(in: .assistant))
     }
 
+    @Test func remoteAIExperimentIsDisabledUnlessExplicitlyEnabled() {
+        let suite = "PromptAITests.RemoteAIExperiment.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            Issue.record("Could not create an isolated UserDefaults suite")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        #expect(!PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
+        defaults.set(true, forKey: PromptExperimentalFeatures.remoteAIEnabledDefaultsKey)
+        #expect(PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
+    }
+
     @Test func dynamicTerminalToolSpecsUseFunctionProtocol() {
         let spec = PromptTerminalTool.run.appServerSpec
         #expect(spec["type"] as? String == "function")

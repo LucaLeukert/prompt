@@ -8,6 +8,7 @@ enum PromptTerminalIntegration {
             let surface = PromptTerminalSurface.wrap(view)
             guard !PromptTerminalCapabilities.isCompositeAuthority(surface) else { return nil }
             if let remote = PromptTerminalCapabilities.remoteContext(for: surface) {
+                guard PromptTerminalCapabilities.allowsAI(on: surface) else { return nil }
                 if remote.supportsInlineRichContent {
                     return AnyView(ZStack {
                         PromptRichContentLayer(surfaceView: surface).zIndex(9)
@@ -32,7 +33,7 @@ enum PromptTerminalIntegration {
             let surface = PromptTerminalSurface.wrap(view)
             guard !PromptTerminalCapabilities.isCompositeAuthority(surface) else { return nil }
             let needsRemoteFallbackBar = PromptTerminalCapabilities.remoteContext(for: surface)
-                .map { !$0.supportsInlineRichContent } ?? false
+                .map { !$0.supportsInlineRichContent && PromptTerminalCapabilities.allowsAI(on: surface) } ?? false
             guard PromptComposerPresentation.current == .commandBar || needsRemoteFallbackBar else { return nil }
             return AnyView(PromptTerminalCommandBar(
                 surfaceView: surface,
@@ -100,6 +101,13 @@ enum PromptTerminalIntegration {
            !hasMarkedText {
             PromptRichContentStore.shared.freezeReservations(for: surface)
             if PromptNativeInputRouter.handleReturn(on: surface) { return true }
+            if let command = surface.promptInput()?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !command.isEmpty {
+                NotificationCenter.default.post(
+                    name: .promptTerminalCommandSubmitted,
+                    object: surface,
+                    userInfo: [Notification.Name.CommandTextKey: command])
+            }
         }
         return false
     }
@@ -110,4 +118,6 @@ extension Notification.Name {
     static let CommandExitCodeKey = ghosttyCommandDidFinish.rawValue + ".exitCode"
     static let CommandDurationNanosecondsKey = ghosttyCommandDidFinish.rawValue + ".durationNanoseconds"
     static let promptRemoteControlC = Notification.Name("dev.prompt.remoteControlC")
+    static let promptTerminalCommandSubmitted = Notification.Name("dev.prompt.terminalCommandSubmitted")
+    static let CommandTextKey = promptTerminalCommandSubmitted.rawValue + ".text"
 }

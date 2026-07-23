@@ -26,6 +26,7 @@ enum PromptTerminalEnvironment {
 
     @MainActor
     static func allowsRichContent(on surfaceView: PromptTerminalSurface) -> Bool {
+        guard PromptTerminalCapabilities.allowsAI(on: surfaceView) else { return false }
         guard let surface = surfaceView.surface else { return false }
         let alternate = PromptLibghostty.isAlternateScreen(surfaceView)
         let pid = Int32(ghostty_surface_foreground_pid(surface))
@@ -1217,6 +1218,15 @@ final class PromptModel: ObservableObject {
     }
     private var pendingTerminalRuns: [String: PendingTerminalRun] = [:]
 
+    /// A presentation-only view of a Prompt-managed terminal turn. The
+    /// sidebar uses this to distinguish Agent mode from an ordinary shell.
+    struct SidebarAgentActivity {
+        let label: String
+        let detail: String
+        let title: String
+        let isWorking: Bool
+    }
+
     private init() {
         // Install the OSC 133 observer before the user runs the first command;
         // context retrieval must not be what activates terminal history.
@@ -1399,6 +1409,12 @@ final class PromptModel: ObservableObject {
 
     func ownsTerminalInput(_ surface: PromptTerminalSurface) -> Bool {
         terminalResponseSurface === surface
+    }
+
+    func sidebarAgentActivity(for surface: PromptTerminalSurface) -> SidebarAgentActivity? {
+        guard terminalResponseSurface === surface else { return nil }
+        let label = activeTurnKind.isTerminalAgent ? "Codex agent" : "Codex"
+        return .init(label: label, detail: status, title: activeRequestText, isWorking: isRunning)
     }
 
     @discardableResult
@@ -3375,7 +3391,8 @@ enum PromptNativeInputRouter {
     }
 
     static func observeRemoteKeyDown(_ event: NSEvent, on surfaceView: PromptTerminalSurface) {
-        guard PromptTerminalCapabilities.isManagedRemote(surfaceView) else { return }
+        guard PromptTerminalCapabilities.isManagedRemote(surfaceView),
+              PromptTerminalCapabilities.allowsAI(on: surfaceView) else { return }
         let id = ObjectIdentifier(surfaceView)
         let modifiers = event.modifierFlags.intersection([.command, .control, .option])
         if event.keyCode == 0x24 || event.keyCode == 0x4C {

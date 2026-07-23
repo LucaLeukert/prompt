@@ -35,7 +35,7 @@ struct PromptCommandPaletteView: View {
                 PromptSessionLauncher.remoteOptions(store: store)
             }),
             PromptCommandOption(title: "Codex agent", section: "Create session", subtitle: directory.promptDisplayPath, description: "Start Codex in a dedicated session", leadingIcon: "sparkles", primaryActionTitle: "Start Codex in current directory") {
-                store.createLocal(directory: directory, command: "codex", title: "Codex")
+                store.createLocal(directory: directory, command: PromptAgentCommand.codex, title: "Codex")
             },
             PromptCommandOption(title: "Split right", section: "Actions", description: "Split the focused session horizontally", symbols: ["⌘", "D"], leadingIcon: "rectangle.split.2x1", primaryActionTitle: "Split focused session right") {
                 store.splitFocused(axis: .horizontal)

@@ -1,5 +1,14 @@
 import Foundation
 
+enum PromptAgentCommand {
+    /// Ghostty starts explicit commands through a non-login shell, so it
+    /// cannot rely on a user's shell profile to add Homebrew to PATH.
+    static var codex: String {
+        let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) ?? "codex"
+    }
+}
+
 extension String {
     /// A presentation-only path form. Commands and persistence continue using
     /// the original absolute value.

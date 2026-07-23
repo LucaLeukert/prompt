@@ -1,6 +1,21 @@
 import AppKit
 import SwiftUI
 
+/// Opt-in switches for functionality that is still being evaluated in real
+/// terminal sessions. Values are deliberately absent unless an experiment is
+/// explicitly enabled, so every flag defaults to `false`.
+enum PromptExperimentalFeatures {
+    static let remoteAIEnabledDefaultsKey = "PromptExperimentalRemoteAIEnabled"
+
+    static var remoteAIEnabled: Bool {
+        remoteAIEnabled(in: .ghostty)
+    }
+
+    static func remoteAIEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: remoteAIEnabledDefaultsKey) as? Bool ?? false
+    }
+}
+
 @MainActor
 enum PromptTerminalCapabilities {
     struct RemoteContext: Equatable {
@@ -34,6 +49,12 @@ enum PromptTerminalCapabilities {
         remoteContext(for: surface) != nil
     }
 
+    /// Managed SSH/tmux sessions stay terminal-only unless the remote AI
+    /// experiment is explicitly enabled. Local surfaces are unaffected.
+    static func allowsAI(on surface: PromptTerminalSurface) -> Bool {
+        !isManagedRemote(surface) || PromptExperimentalFeatures.remoteAIEnabled
+    }
+
     static func registerCompositeAuthority(_ surface: GhosttyAppKitSurface) {
         compositeAuthorities.insert(surface.identity)
     }
@@ -54,6 +75,11 @@ enum PromptTerminalCapabilities {
 
 @MainActor
 final class PromptTerminalRuntime: ObservableObject {
+    struct SidebarPullRequest: Equatable {
+        let number: Int
+        let title: String
+        let isDraft: Bool
+    }
     struct RemotePaneDescriptor: Equatable {
         let id: String
         let active: Bool
@@ -102,13 +128,22 @@ final class PromptTerminalRuntime: ObservableObject {
     private var remoteConfigurations: [PromptPane.ID: PromptRemoteSessionConfiguration] = [:]
     var onRemotePaneInventory: ((PromptPane.ID, [RemotePaneDescriptor]) -> Void)?
     @Published private(set) var localGitBranches: [PromptPane.ID: String] = [:]
+    @Published private(set) var localPaneCommands: [PromptPane.ID: String] = [:]
+    @Published private(set) var localPullRequests: [PromptPane.ID: SidebarPullRequest] = [:]
+    @Published private(set) var localCommandStartedAt: [PromptPane.ID: Date] = [:]
     private var localStatusTasks: [PromptPane.ID: Task<Void, Never>] = [:]
+    private var commandObservers: [NSObjectProtocol] = []
+    private var pullRequestRefreshes: [PromptPane.ID: Date] = [:]
 
     init() {
         PromptTypography.registerBundledFonts()
         application = GhosttyAppKitApplication(configDefaults: """
         font-family = ""
         font-family = Geist Mono
+        # Terminal input must preserve one glyph per typed cell. In particular,
+        # Geist Mono's programming ligatures can reshape `--help` and make its
+        # spaces look displaced while the cursor remains cell-aligned.
+        font-feature = -calt, -liga, -dlig
         window-title-font-family = Geist
         background = 171716
         foreground = E8E8E6
@@ -132,6 +167,25 @@ final class PromptTerminalRuntime: ObservableObject {
         palette = 14=#7BC8D0
         palette = 15=#F5F5F3
         """)
+        commandObservers = [
+            NotificationCenter.default.addObserver(
+                forName: .promptTerminalCommandSubmitted, object: nil, queue: .main) { [weak self] note in
+                    guard let self,
+                          let surface = note.object as? PromptTerminalSurface,
+                          let command = note.userInfo?[Notification.Name.CommandTextKey] as? String,
+                          let paneID = self.surfaces.first(where: { $0.value === surface })?.key else { return }
+                    self.localPaneCommands[paneID] = command
+                    self.localCommandStartedAt[paneID] = Date()
+                },
+            NotificationCenter.default.addObserver(
+                forName: .ghosttyCommandDidFinish, object: nil, queue: .main) { [weak self] note in
+                    guard let self,
+                          let surface = note.object as? PromptTerminalSurface,
+                          let paneID = self.surfaces.first(where: { $0.value === surface })?.key else { return }
+                    self.localPaneCommands.removeValue(forKey: paneID)
+                    self.localCommandStartedAt.removeValue(forKey: paneID)
+                },
+        ]
     }
 
     func createSurface(for pane: PromptPane, configuration: PromptSessionConfiguration) -> PromptTerminalSurface? {
@@ -201,6 +255,10 @@ final class PromptTerminalRuntime: ObservableObject {
         remoteTmuxPaneIDs.removeValue(forKey: paneID)
         remoteConfigurations.removeValue(forKey: paneID)
         localGitBranches.removeValue(forKey: paneID)
+        localPaneCommands.removeValue(forKey: paneID)
+        localPullRequests.removeValue(forKey: paneID)
+        localCommandStartedAt.removeValue(forKey: paneID)
+        pullRequestRefreshes.removeValue(forKey: paneID)
         if let surface = surfaces.removeValue(forKey: paneID) {
             PromptTerminalCapabilities.unregister(surface)
             PromptNativeInputRouter.cleanup(for: surface)
@@ -282,8 +340,16 @@ final class PromptTerminalRuntime: ObservableObject {
                 if let directory = surface?.workingDirectory,
                    let branch = await Self.fetchLocalGitBranch(directory) {
                     self?.localGitBranches[paneID] = branch
+                    let refreshDue = self?.pullRequestRefreshes[paneID].map { Date().timeIntervalSince($0) > 20 } ?? true
+                    if refreshDue {
+                        self?.pullRequestRefreshes[paneID] = Date()
+                        let pullRequest = await Self.fetchPullRequest(directory, branch: branch)
+                        if let pullRequest { self?.localPullRequests[paneID] = pullRequest }
+                        else { self?.localPullRequests.removeValue(forKey: paneID) }
+                    }
                 } else {
                     self?.localGitBranches.removeValue(forKey: paneID)
+                    self?.localPullRequests.removeValue(forKey: paneID)
                 }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
@@ -304,6 +370,30 @@ final class PromptTerminalRuntime: ObservableObject {
             let branch = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return branch?.isEmpty == false ? branch : nil
+        }.value
+    }
+
+    private nonisolated static func fetchPullRequest(_ directory: String, branch: String) async -> SidebarPullRequest? {
+        await Task.detached {
+            let executable = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh"].first {
+                FileManager.default.isExecutableFile(atPath: $0)
+            }
+            guard let executable else { return nil }
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = ["pr", "view", "--head", branch, "--json", "number,title,isDraft,state"]
+            process.currentDirectoryURL = URL(fileURLWithPath: directory)
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { return nil }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let object = try? JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any],
+                  let number = object["number"] as? Int,
+                  let title = object["title"] as? String,
+                  (object["state"] as? String) == "OPEN" else { return nil }
+            return SidebarPullRequest(number: number, title: title, isDraft: object["isDraft"] as? Bool ?? false)
         }.value
     }
 

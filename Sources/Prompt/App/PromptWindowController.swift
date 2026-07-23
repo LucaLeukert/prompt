@@ -220,6 +220,7 @@ private struct PromptSessionSidebar: View {
 private struct PromptSidebarSessionRow: View {
     @ObservedObject var store: PromptWorkspaceStore
     @ObservedObject private var runtime: PromptTerminalRuntime
+    @ObservedObject private var promptModel = PromptModel.shared
     let session: PromptSession
     let shortcut: Int?
     let grouped: Bool
@@ -264,39 +265,67 @@ private struct PromptSidebarSessionRow: View {
         return path
     }
 
+    private enum AgentKind {
+        case codex, claude
+
+        var label: String { self == .codex ? "Codex" : "Claude" }
+        var icon: String { self == .codex ? "sparkles" : "wand.and.stars" }
+        var tint: Color { self == .codex ? PromptTheme.accent : Color(red: 0.83, green: 0.53, blue: 0.31) }
+    }
+
+    private var agentActivity: PromptModel.SidebarAgentActivity? {
+        guard let surface else { return nil }
+        return promptModel.sidebarAgentActivity(for: surface)
+    }
+
+    private var agentKind: AgentKind? {
+        if agentActivity != nil { return .codex }
+        let candidates = [remoteStatus?.command, runtime.localPaneCommands[session.focusedPaneID], session.configuration.launchCommand, surface?.title]
+            .compactMap { $0?.lowercased() }
+        if candidates.contains(where: { $0.contains("codex") }) { return .codex }
+        if candidates.contains(where: { $0.contains("claude") }) { return .claude }
+        return nil
+    }
+
+    private var agentHeadline: String {
+        if let activity = agentActivity, !activity.title.isEmpty { return activity.title }
+        if let context, !context.hasPrefix("Running ") { return context }
+        let trimmedTitle = surface?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let generic = ["codex", "claude", "terminal", session.title.lowercased()]
+        if !trimmedTitle.isEmpty,
+           !generic.contains(trimmedTitle.lowercased()),
+           !trimmedTitle.contains(directory),
+           !trimmedTitle.contains("/Users/") { return trimmedTitle }
+        return session.title == "Codex" || session.title == "Claude" ? "\(displayTitle) workspace" : session.title
+    }
+
+    private var pullRequest: PromptTerminalRuntime.SidebarPullRequest? {
+        guard !session.configuration.isRemote else { return nil }
+        return runtime.localPullRequests[session.focusedPaneID]
+    }
+
+    private var startedAt: Date? {
+        runtime.localCommandStartedAt[session.focusedPaneID]
+    }
+
     var body: some View {
         Button { store.focus(sessionID: session.id, paneID: session.focusedPaneID) } label: {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: remoteConnectionState?.isOffline == true ? "wifi.exclamationmark" : (session.configuration.isRemote ? "network" : "terminal"))
-                    .font(.system(size: 14))
-                    .foregroundStyle(remoteConnectionState?.isOffline == true ? Color.red : Color.secondary)
-                    .frame(width: 18).padding(.top, 2)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                        Spacer(minLength: 4)
-                        if isExecuting { ProgressView().controlSize(.mini) }
-                        if let shortcut {
-                            Text("⌘\(shortcut)").font(.caption2.monospaced()).foregroundStyle(.secondary)
-                                .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                        }
-                    }
-                    if let context { Text(context).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
-                    HStack(spacing: 5) {
-                        Text(metadata).font(.system(size: 10, design: .monospaced)).lineLimit(1)
-                        let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
-                        if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
-                    }.foregroundStyle(.tertiary)
-                }
+            Group {
+                if let agentKind { agentRow(agentKind) } else { standardRow }
             }
-            .padding(.horizontal, 10).padding(.vertical, grouped ? 7 : 9)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .scaleEffect(hovering ? 1.012 : 1, anchor: .leading)
             .offset(x: hovering ? 3 : 0)
             .animation(.spring(response: 0.18, dampingFraction: 0.72), value: hovering)
-            .background(session.id == store.workspace.focusedSessionID ? PromptTheme.selection : Color.clear, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(session.id == store.workspace.focusedSessionID ? PromptTheme.border : .clear, lineWidth: 0.5))
+            .background(
+                session.id == store.workspace.focusedSessionID
+                    ? PromptTheme.selection
+                    : Color.clear,
+                in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(
+                session.id == store.workspace.focusedSessionID ? PromptTheme.border : .clear,
+                lineWidth: 0.5))
         }
         .buttonStyle(.plain).frame(maxWidth: .infinity)
         .onHover { hovering = $0 }
@@ -331,6 +360,70 @@ private struct PromptSidebarSessionRow: View {
             Divider()
             Button("Close Session", role: .destructive) { store.closeSession(session.id) }
         }
+    }
+
+    private var standardRow: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: remoteConnectionState?.isOffline == true ? "wifi.exclamationmark" : (session.configuration.isRemote ? "network" : "terminal"))
+                .font(.system(size: 14))
+                .foregroundStyle(remoteConnectionState?.isOffline == true ? Color.red : Color.secondary)
+                .frame(width: 18).padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if isExecuting { ProgressView().controlSize(.mini) }
+                    if let shortcut { shortcutLabel }
+                }
+                if let context { Text(context).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
+                metadataLine
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, grouped ? 7 : 9)
+    }
+
+    private func agentRow(_ kind: AgentKind) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: kind.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(kind.tint).frame(width: 14)
+                Text(kind.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if isExecuting || agentActivity?.isWorking == true { ProgressView().controlSize(.mini) }
+                if let startedAt {
+                    TimelineView(.periodic(from: .now, by: 60)) { _ in
+                        Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                    }
+                }
+                if let shortcut { shortcutLabel }
+            }
+            Text(agentHeadline).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+            HStack(spacing: 6) {
+                if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+                    Text(branch).font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1)
+                } else {
+                    Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                }
+                if let pullRequest {
+                    Text("#\(pullRequest.number)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(PromptTheme.accent)
+                    Image(systemName: pullRequest.isDraft ? "pencil" : "arrow.triangle.pull").font(.system(size: 10, weight: .semibold)).foregroundStyle(PromptTheme.accent)
+                }
+            }
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 11).padding(.vertical, grouped ? 8 : 10)
+    }
+
+    private var shortcutLabel: some View {
+        Text("⌘\(shortcut!)").font(.caption2.monospaced()).foregroundStyle(.secondary)
+            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+    }
+
+    private var metadataLine: some View {
+        HStack(spacing: 5) {
+            Text(metadata).font(.system(size: 10, design: .monospaced)).lineLimit(1)
+            let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
+            if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
+        }.foregroundStyle(.tertiary)
     }
 
     private func abbreviated(_ path: String) -> String {
@@ -442,6 +535,10 @@ extension PromptSessionConfiguration {
     }
     var configuredDirectory: String? {
         switch self { case .local(let local): local.workingDirectory; case .remote(let remote): remote.workingDirectory }
+    }
+    var launchCommand: String? {
+        if case .local(let local) = self { return local.command }
+        return nil
     }
     var sidebarSummary: String {
         switch self {
