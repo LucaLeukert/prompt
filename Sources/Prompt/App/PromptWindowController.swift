@@ -401,17 +401,16 @@ private struct PromptSidebarSessionRow: View {
             .frame(maxWidth: .infinity)
 
             if pullRequest != nil || shortcut != nil {
-                HStack(spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
                     if let pullRequest {
                         Link(destination: pullRequest.url) {
-                            HStack(spacing: 3) {
+                            HStack(alignment: .firstTextBaseline, spacing: 3) {
                                 Image(systemName: "arrow.triangle.pull")
                                     .font(.system(size: 9, weight: .semibold))
                                 Text("\(pullRequest.number)")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                             }
                             .foregroundStyle(pullRequestColor)
-                            .padding(.vertical, 3)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
@@ -420,7 +419,7 @@ private struct PromptSidebarSessionRow: View {
                     if let shortcut { shortcutLabel }
                 }
                 .padding(.trailing, 8)
-                .padding(.top, 9)
+                .padding(.top, 8)
             }
         }
         .onHover {
