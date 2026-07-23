@@ -291,6 +291,7 @@ private struct PromptSidebarSessionRow: View {
     let shortcut: Int?
     let grouped: Bool
     @State private var hovering = false
+    @State private var showsAgentCard = false
     @State private var showsCloseHint = false
     @State private var closeHintGeneration = 0
 
@@ -354,6 +355,7 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var agentHeadline: String {
+        if let thread = runtime.localCodexThreads[session.focusedPaneID], !thread.title.isEmpty { return thread.title }
         if let activity = agentActivity, !activity.title.isEmpty { return activity.title }
         if let context, !context.hasPrefix("Running ") { return context }
         let trimmedTitle = surface?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -380,6 +382,7 @@ private struct PromptSidebarSessionRow: View {
                 if let agentKind { agentRow(agentKind) } else { standardRow }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 58)
             .contentShape(Rectangle())
             .scaleEffect(hovering ? 1.012 : 1, anchor: .leading)
             .offset(x: hovering ? 3 : 0)
@@ -394,7 +397,10 @@ private struct PromptSidebarSessionRow: View {
                 lineWidth: 0.5))
         }
         .buttonStyle(.plain).frame(maxWidth: .infinity)
-        .onHover { hovering = $0 }
+        .onHover {
+            hovering = $0
+            showsAgentCard = $0 && agentKind != nil
+        }
         .animation(.easeOut(duration: 0.12), value: shortcut)
         .popover(isPresented: $showsCloseHint, arrowEdge: .bottom) {
             HStack(spacing: 9) {
@@ -405,6 +411,16 @@ private struct PromptSidebarSessionRow: View {
                 }
             }
             .padding(12)
+        }
+        .popover(isPresented: $showsAgentCard, arrowEdge: .trailing) {
+            if agentKind != nil {
+                if #available(macOS 13.3, *) {
+                    mouseTransparentAgentHoverCard
+                        .presentationCornerRadius(12)
+                } else {
+                    mouseTransparentAgentHoverCard
+                }
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .promptRemoteControlC)) { note in
             guard session.id == store.workspace.focusedSessionID,
@@ -445,24 +461,26 @@ private struct PromptSidebarSessionRow: View {
                 metadataLine
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, grouped ? 7 : 9)
+        .padding(.horizontal, 10)
     }
 
     private func agentRow(_ kind: AgentKind) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: 10) {
+            CodexMark()
+                .frame(width: 18, height: 18)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Image(systemName: kind.icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(kind.tint).frame(width: 14)
-                Text(kind.label).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
                 Spacer(minLength: 4)
-                if isExecuting || agentActivity?.isWorking == true { ProgressView().controlSize(.mini) }
-                if let startedAt {
+                if agentActivity?.isWorking == true || runtime.localCodexThreads[session.focusedPaneID]?.isWorking == true { ProgressView().controlSize(.mini) }
+                if let startedAt, agentActivity?.isWorking == true {
                     TimelineView(.periodic(from: .now, by: 60)) { _ in
                         Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
                     }
                 }
                 if let shortcut { shortcutLabel }
             }
-            Text(agentHeadline).font(.system(size: 15, weight: .semibold)).lineLimit(1)
             HStack(spacing: 6) {
                 if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
                     Text(branch).font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1)
@@ -470,13 +488,95 @@ private struct PromptSidebarSessionRow: View {
                     Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
                 }
                 if let pullRequest {
-                    Text("#\(pullRequest.number)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(PromptTheme.accent)
-                    Image(systemName: pullRequest.isDraft ? "pencil" : "arrow.triangle.pull").font(.system(size: 10, weight: .semibold)).foregroundStyle(PromptTheme.accent)
+                    Text("#\(pullRequest.number)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(pullRequestColor)
+                    Image(systemName: pullRequest.isDraft ? "pencil" : "arrow.triangle.pull").font(.system(size: 10, weight: .semibold)).foregroundStyle(pullRequestColor)
                 }
             }
             .foregroundStyle(.tertiary)
+            }
         }
-        .padding(.horizontal, 11).padding(.vertical, grouped ? 8 : 10)
+        .padding(.horizontal, 10)
+    }
+
+    private var pullRequestColor: Color {
+        guard let pullRequest else { return .secondary }
+        if pullRequest.isDraft { return Color.orange }
+        switch pullRequest.state { case "MERGED": return Color.purple; case "CLOSED": return Color.red; default: return PromptTheme.accent }
+    }
+
+    private var agentHoverCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(agentHeadline)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+
+            hoverCardRow(systemImage: "folder", text: displayTitle)
+
+            if let host = Host.current().localizedName, !host.isEmpty {
+                hoverCardRow(systemImage: "desktopcomputer", text: host)
+            }
+
+            if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+                hoverCardRow(systemImage: "arrow.triangle.branch", text: branch, monospaced: true)
+            }
+
+            if let pullRequest {
+                hoverCardRow(
+                    systemImage: pullRequest.isDraft ? "pencil" : "arrow.triangle.pull",
+                    text: "#\(pullRequest.number) · \(pullRequest.title)",
+                    color: pullRequestColor)
+            }
+
+            HStack(spacing: 7) {
+                CodexMark().frame(width: 13, height: 13)
+                Text(codexModelSummary)
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+        }
+        .frame(width: 220, alignment: .leading)
+        .padding(12)
+    }
+
+    private var mouseTransparentAgentHoverCard: some View {
+        agentHoverCard
+            .background(PromptMouseTransparentPopover())
+            .allowsHitTesting(false)
+    }
+
+    private var codexModelSummary: String {
+        guard let thread = runtime.localCodexThreads[session.focusedPaneID] else { return "Codex" }
+        let model = thread.model.map(formatCodexModel) ?? "Codex"
+        guard let effort = thread.reasoningEffort, !effort.isEmpty else { return model }
+        return "\(model) · \(effort.prefix(1).uppercased())\(effort.dropFirst())"
+    }
+
+    private func formatCodexModel(_ model: String) -> String {
+        model.split(separator: "-").map { component in
+            let value = String(component)
+            if value.lowercased() == "gpt" { return "GPT" }
+            if value.allSatisfy({ $0.isNumber || $0 == "." }) { return value }
+            return value.prefix(1).uppercased() + value.dropFirst()
+        }
+        .joined(separator: "-")
+    }
+
+    private func hoverCardRow(
+        systemImage: String,
+        text: String,
+        monospaced: Bool = false,
+        color: Color = .secondary
+    ) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11))
+                .frame(width: 13)
+            Text(text)
+                .font(.system(size: 11, design: monospaced ? .monospaced : .default))
+                .lineLimit(1)
+        }
+        .foregroundStyle(color)
     }
 
     private var shortcutLabel: some View {
@@ -494,6 +594,41 @@ private struct PromptSidebarSessionRow: View {
 
     private func abbreviated(_ path: String) -> String {
         path.promptDisplayPath
+    }
+}
+
+/// SwiftUI presents a popover in a separate AppKit window. Making that window
+/// mouse-transparent keeps this hover-only card from consuming the click that
+/// selects its sidebar row.
+private struct PromptMouseTransparentPopover: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        PromptMouseTransparentView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.window?.ignoresMouseEvents = true
+    }
+}
+
+private final class PromptMouseTransparentView: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.ignoresMouseEvents = true
+    }
+}
+
+private struct CodexMark: View {
+    var body: some View {
+        Group {
+            if let url = Bundle.main.url(forResource: "ChatGPTMark", withExtension: "svg", subdirectory: "Fonts"),
+               let image = NSImage(contentsOf: url) {
+                Image(nsImage: image).resizable().renderingMode(.template).aspectRatio(contentMode: .fit)
+            } else {
+                Image(systemName: "circle.hexagongrid.fill").resizable().aspectRatio(contentMode: .fit)
+            }
+        }
+        .foregroundStyle(.white)
+        .accessibilityLabel("Codex")
     }
 }
 
