@@ -42,8 +42,8 @@ The full product and technical plan is in [PLAN.md](PLAN.md).
 
 Prompt keeps its own sources, resources, and tests in this repository. The
 pinned Ghostty source under `Vendor/ghostty` remains an unmodified submodule;
-`Scripts/sync-ghostty.sh` copies Prompt-owned files into that checkout and
-applies the small, versioned integration patch before every build or test.
+the root build copies Prompt-owned files into that checkout and applies the
+small, versioned integration patch before every build or test.
 
 Start from a full clone with submodules:
 
@@ -52,16 +52,69 @@ git clone --recurse-submodules https://github.com/LucaLeukert/prompt.git
 cd prompt
 ```
 
+From the repository root, the complete local development loop is:
+
 ```sh
-./Scripts/build.sh
-open DerivedData/Build/Products/Debug/Prompt.app
+make run
 ```
 
-The project currently targets macOS and requires Xcode plus Zig 0.15 (the
-build script installs the Homebrew package if it is unavailable).
-
-Run the focused Prompt tests with:
+For native Xcode development, open the checked-in workspace:
 
 ```sh
-./Scripts/test.sh
+make xcode
+```
+
+This opens `Prompt.xcworkspace` with a shared **Prompt App** scheme backed by a
+native macOS application target. Xcode Run, Test, Profile, Analyze, and Archive
+are configured. The scheme prepares the Prompt sources, resources, integration
+patch, and native Ghostty framework before Xcode builds, so editing in the
+repository and pressing Run uses the current checkout.
+
+The root `Makefile` is the build system entry point. It owns source/resource
+synchronization, the patched native Ghostty framework build, the Xcode app
+build, artifact validation, tests, and launching. The runnable bundle always
+lands at:
+
+```text
+Artifacts/Debug/Prompt.app
+```
+
+Other useful commands are:
+
+```sh
+make build  # build without launching
+make test   # run the Prompt test suite
+make format # apply Swift formatting
+make lint   # check Swift formatting/rules and GitHub Actions
+make clean  # remove repo-local generated build output
+make help   # show the command summary
+```
+
+Install the local formatting and lint tools once with `make lint-install`.
+Prompt uses SwiftFormat, SwiftLint, and actionlint with checked-in repository
+configuration. CI runs the same `make lint` target used locally.
+
+All generated development state stays under `Artifacts/`, `DerivedData/`, and
+the checked-out Ghostty submodule in this repository. Prompt-owned fonts and
+icons are vendored under `Resources/` and Xcode copies them into the app as
+part of the build; the finished bundle is checked for required resources
+before a build is reported successful.
+
+Set `CONFIGURATION=Release` to use the same targets for a local Release build.
+The project targets macOS and requires Xcode plus Zig 0.15; the build installs
+the Homebrew Zig formula if it is unavailable.
+
+## Git worktrees
+
+Prompt treats both a `.git` directory and Git's `.git` worktree file as a
+project-root marker, so terminal commands and Codex sessions stay scoped to
+the active worktree. Build and test from the worktree itself; the scripts
+initialize its Ghostty submodule, apply the pinned Prompt patch, and build an
+XCFramework in that checkout. This keeps generated terminal artifacts and
+the `Artifacts`/`DerivedData` output isolated between worktrees.
+
+```sh
+git worktree add ../prompt-feature -b feature
+cd ../prompt-feature
+make test
 ```

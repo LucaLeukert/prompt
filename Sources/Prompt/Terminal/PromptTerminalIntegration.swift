@@ -118,6 +118,6 @@ extension Notification.Name {
     static let CommandExitCodeKey = ghosttyCommandDidFinish.rawValue + ".exitCode"
     static let CommandDurationNanosecondsKey = ghosttyCommandDidFinish.rawValue + ".durationNanoseconds"
     static let promptRemoteControlC = Notification.Name("dev.prompt.remoteControlC")
-    static let promptTerminalCommandSubmitted = Notification.Name("dev.prompt.terminalCommandSubmitted")
+    static let promptTerminalCommandSubmitted = Notification.Name("net.leukert.prompt.terminalCommandSubmitted")
     static let CommandTextKey = promptTerminalCommandSubmitted.rawValue + ".text"
 }

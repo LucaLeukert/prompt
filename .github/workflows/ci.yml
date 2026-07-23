@@ -15,6 +15,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint and format
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install lint tools
+        run: make lint-install
+
+      - name: Run linters
+        run: make lint
+
   build-and-test:
     name: Validate repository wiring
     runs-on: ubuntu-latest
@@ -28,13 +43,14 @@ jobs:
 
       - name: Verify source sync and patch
         run: |
-          ./Scripts/sync-ghostty.sh
+          make sync
           git diff --check
           git -C Vendor/ghostty diff --check
 
-      - name: Validate shell scripts
+      - name: Validate Xcode workspace metadata
         run: |
-          sh -n Scripts/build.sh
-          sh -n Scripts/run.sh
-          sh -n Scripts/sync-ghostty.sh
-          sh -n Scripts/test.sh
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse("Prompt.xcworkspace/contents.xcworkspacedata")
+          ET.parse("Prompt.xcworkspace/xcshareddata/xcschemes/Prompt App.xcscheme")
+          PY

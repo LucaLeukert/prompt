@@ -1181,8 +1181,8 @@ private struct CommandRow: View {
             let offset = option.title.distance(from: option.title.startIndex, to: idx)
             let attrStart = attributed.index(attributed.startIndex, offsetByCharacters: offset)
             let attrEnd = attributed.index(attrStart, offsetByCharacters: 1)
-            attributed[attrStart..<attrEnd].font = .body.bold()
-            attributed[attrStart..<attrEnd].foregroundColor = Color.accentColor
+            attributed[attrStart ..< attrEnd].font = .body.bold()
+            attributed[attrStart ..< attrEnd].foregroundColor = Color.accentColor
         }
 
         return Text(attributed)
@@ -1201,8 +1201,8 @@ private struct CommandRow: View {
             let offset = subtitle.distance(from: subtitle.startIndex, to: idx)
             let attrStart = attributed.index(attributed.startIndex, offsetByCharacters: offset)
             let attrEnd = attributed.index(attrStart, offsetByCharacters: 1)
-            attributed[attrStart..<attrEnd].font = .caption.bold()
-            attributed[attrStart..<attrEnd].foregroundColor = Color.accentColor
+            attributed[attrStart ..< attrEnd].font = .caption.bold()
+            attributed[attrStart ..< attrEnd].foregroundColor = Color.accentColor
         }
 
         return Text(attributed)

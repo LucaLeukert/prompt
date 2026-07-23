@@ -108,7 +108,7 @@ struct PromptRemoteSession: Codable, Hashable {
 }
 
 @MainActor enum PromptSessionLauncher {
-    private static let logger = Logger(subsystem: "dev.prompt.terminal", category: "tailnet-discovery")
+    private static let logger = Logger(subsystem: "net.leukert.prompt", category: "tailnet-discovery")
     private static let savedKey = "PromptPersistentRemoteSessions"
     private static let tailnetSavedKey = "PromptDiscoveredTailnetHosts"
     private static var tailnetCache: (date: Date, hosts: [String])?
@@ -248,7 +248,7 @@ struct PromptRemoteSession: Codable, Hashable {
             logger.error("Tailscale executable was not found")
             return lastSuccessfulHosts
         }
-        for attempt in 1...3 {
+        for attempt in 1 ... 3 {
             let process = Process()
             let output = Pipe()
             let error = Pipe()

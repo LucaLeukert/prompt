@@ -171,14 +171,14 @@ final class PromptTmuxControlWriter: @unchecked Sendable {
     private func sendInputLocked(_ bytes: [UInt8], pane: String) {
         // `send-keys -H` avoids shell quoting and preserves control/escape bytes.
         for chunkStart in stride(from: 0, to: bytes.count, by: 256) {
-            let chunk = bytes[chunkStart..<min(bytes.count, chunkStart + 256)]
+            let chunk = bytes[chunkStart ..< min(bytes.count, chunkStart + 256)]
             let hex = chunk.map { String(format: "%02x", $0) }.joined(separator: " ")
             sendLocked("send-keys -t \(pane) -H \(hex)")
         }
     }
 
     private func sendLocked(_ command: String) {
-        do { try handle.write(contentsOf: Data((command + "\n").utf8)) } catch { }
+        do { try handle.write(contentsOf: Data((command + "\n").utf8)) } catch {}
     }
 }
 
@@ -231,9 +231,9 @@ final class PromptTmuxControlParser: @unchecked Sendable {
                 result.append(bytes[index]); index += 1; continue
             }
             if index + 3 < bytes.count,
-               (0x30...0x37).contains(bytes[index + 1]),
-               (0x30...0x37).contains(bytes[index + 2]),
-               (0x30...0x37).contains(bytes[index + 3]) {
+               (0x30 ... 0x37).contains(bytes[index + 1]),
+               (0x30 ... 0x37).contains(bytes[index + 2]),
+               (0x30 ... 0x37).contains(bytes[index + 3]) {
                 let decoded = (bytes[index + 1] - 0x30) * 64
                     + (bytes[index + 2] - 0x30) * 8
                     + (bytes[index + 3] - 0x30)

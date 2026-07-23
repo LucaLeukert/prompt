@@ -913,7 +913,7 @@ enum PromptRichParser {
             }
 
             let bodyStart = source.index(cursor, offsetBy: opener.count)
-            guard let closeRange = source.range(of: closer, range: bodyStart..<source.endIndex) else {
+            guard let closeRange = source.range(of: closer, range: bodyStart ..< source.endIndex) else {
                 // An unfinished delimiter is common during streaming. Leave it
                 // as Markdown until the matching delta arrives.
                 markdown.append(contentsOf: source[cursor...])
@@ -921,7 +921,7 @@ enum PromptRichParser {
                 break
             }
             flushMarkdown()
-            let formula = String(source[bodyStart..<closeRange.lowerBound])
+            let formula = String(source[bodyStart ..< closeRange.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !formula.isEmpty { result.append(.math(formula)) }
             cursor = closeRange.upperBound
@@ -2814,7 +2814,7 @@ final class PromptCopilotCompletionServer {
                     continue
                 }
                 guard buffer.count >= headerEnd.upperBound + length else { break }
-                let body = buffer.subdata(in: headerEnd.upperBound..<(headerEnd.upperBound + length))
+                let body = buffer.subdata(in: headerEnd.upperBound ..< (headerEnd.upperBound + length))
                 buffer.removeSubrange(..<(headerEnd.upperBound + length))
                 guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else { continue }
                 DispatchQueue.main.async { self.route(object) }
@@ -3804,7 +3804,6 @@ struct PromptNativeModeBadge: View {
                     }
                 }
 
-
                 if showsKeyboardModePicker {
                     PromptModePickerPreview(
                         selection: surfaceMode,
@@ -4183,7 +4182,7 @@ struct PromptTerminalCommandBar: View {
 
                 TextField(detectedMode == .shell ? "Command" : "Message Assistant", text: $text, axis: .vertical)
                     .textFieldStyle(.plain).font(.custom(PromptTypography.mono, size: 14))
-                    .lineLimit(1...4).focused($focused)
+                    .lineLimit(1 ... 4).focused($focused)
                     .onSubmit(submit)
                 if model.isRunning && detectedMode == .ai { ProgressView().controlSize(.small) }
                 Button(action: submit) { Image(systemName: "arrow.up.circle.fill").font(.title2) }
@@ -4421,7 +4420,7 @@ struct PromptPanelView: View {
                 Button(action: model.captureTerminal) { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("Refresh terminal context")
                 TextField("Message the terminal assistant…", text: $model.prompt, axis: .vertical)
-                    .textFieldStyle(.plain).lineLimit(1...5)
+                    .textFieldStyle(.plain).lineLimit(1 ... 5)
                     .onSubmit(model.send)
                 Button(action: model.send) { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                     .buttonStyle(.plain).disabled(model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRunning)

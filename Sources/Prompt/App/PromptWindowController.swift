@@ -71,7 +71,7 @@ private struct PromptWorkspaceView: View {
         }
         .background {
             HStack {
-                ForEach(0..<9, id: \.self) { index in
+                ForEach(0 ..< 9, id: \.self) { index in
                     Button { store.focusSidebarSession(at: index) } label: { Color.clear }
                         .buttonStyle(.plain)
                         .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])

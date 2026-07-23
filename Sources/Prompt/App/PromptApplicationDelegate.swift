@@ -5,7 +5,7 @@ import OSLog
 
 @MainActor
 final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
-    static let logger = Logger(subsystem: "dev.prompt.terminal", category: "application")
+    static let logger = Logger(subsystem: "net.leukert.prompt", category: "application")
 
     let runtime = PromptTerminalRuntime()
     lazy var workspaceStore = PromptWorkspaceStore(runtime: runtime)
@@ -99,7 +99,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
                 let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
                 let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
 
-                if modifiers == [.command], let number = Int(key), (1...9).contains(number) {
+                if modifiers == [.command], let number = Int(key), (1 ... 9).contains(number) {
                     self.workspaceStore.focusSidebarSession(at: number - 1)
                     return nil
                 }
