@@ -283,7 +283,7 @@ private final class PromptCodexAgentObserver {
             if !receivedWebSocketHandshake {
                 let terminator = Data("\r\n\r\n".utf8)
                 guard let range = serverBuffer.range(of: terminator) else { return }
-                serverBuffer.removeSubrange(serverBuffer.startIndex..<range.upperBound)
+                serverBuffer.removeSubrange(serverBuffer.startIndex ..< range.upperBound)
                 receivedWebSocketHandshake = true
             }
             while let payload = nextWebSocketPayload(from: &serverBuffer) {
@@ -314,7 +314,7 @@ private final class PromptCodexAgentObserver {
             if !sentWebSocketHandshake {
                 let terminator = Data("\r\n\r\n".utf8)
                 guard let range = clientBuffer.range(of: terminator) else { return }
-                clientBuffer.removeSubrange(clientBuffer.startIndex..<range.upperBound)
+                clientBuffer.removeSubrange(clientBuffer.startIndex ..< range.upperBound)
                 sentWebSocketHandshake = true
             }
             while let payload = nextWebSocketPayload(from: &clientBuffer) {
@@ -355,17 +355,17 @@ private final class PromptCodexAgentObserver {
             headerLength = 4
         } else if payloadLength == 127 {
             guard buffer.count >= 10 else { return nil }
-            let length = bytes[2..<10].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            let length = bytes[2 ..< 10].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
             guard length <= UInt64(Int.max) else { return nil }
             payloadLength = Int(length)
             headerLength = 10
         }
         let maskLength = masked ? 4 : 0
         guard buffer.count >= headerLength + maskLength + payloadLength else { return nil }
-        let mask = masked ? [UInt8](buffer[headerLength..<(headerLength + 4)]) : []
+        let mask = masked ? [UInt8](buffer[headerLength ..< (headerLength + 4)]) : []
         let payloadStart = headerLength + maskLength
-        var payload = Data(buffer[payloadStart..<(payloadStart + payloadLength)])
-        buffer.removeSubrange(0..<(payloadStart + payloadLength))
+        var payload = Data(buffer[payloadStart ..< (payloadStart + payloadLength)])
+        buffer.removeSubrange(0 ..< (payloadStart + payloadLength))
         if masked {
             for index in payload.indices { payload[index] ^= mask[index % 4] }
         }
