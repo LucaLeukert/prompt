@@ -10,7 +10,9 @@ DERIVED_DATA := $(ROOT)/DerivedData
 ARTIFACT_DIR := $(ROOT)/Artifacts/$(CONFIGURATION)
 APP := $(ARTIFACT_DIR)/Prompt.app
 EXECUTABLE := $(APP)/Contents/MacOS/Prompt
-ZIG := $(shell brew --prefix zig@0.15 2>/dev/null)/bin/zig
+# Set ZIG to use a custom executable. Otherwise prepare resolves Homebrew's
+# prefix after it installs zig@0.15, so first-time setup works on either CPU.
+ZIG ?=
 
 .PHONY: help build run test lint format lint-install xcode clean prepare sync check-app
 
@@ -57,13 +59,22 @@ sync:
 
 prepare: sync
 	@set -eu; \
-	if [ ! -x "$(ZIG)" ]; then \
-		HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15; \
+	if [ -n "$(ZIG)" ]; then \
+		zig="$(ZIG)"; \
+	else \
+		if ! brew list --versions zig@0.15 >/dev/null 2>&1; then \
+			HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15; \
+		fi; \
+		zig="$$(brew --prefix zig@0.15)/bin/zig"; \
+	fi; \
+	if [ ! -x "$$zig" ]; then \
+		echo "Zig executable is missing: $$zig" >&2; \
+		exit 1; \
 	fi; \
 	rm -rf "$(GHOSTTY)/macos/GhosttyKit.xcframework"; \
 	cd "$(GHOSTTY)"; \
 	env -u SWIFT_DEBUG_INFORMATION_FORMAT -u SWIFT_DEBUG_INFORMATION_VERSION \
-	"$(ZIG)" build -Demit-xcframework=true -Demit-macos-app=false \
+	"$$zig" build -Demit-xcframework=true -Demit-macos-app=false \
 		-Dxcframework-target="$(XCFRAMEWORK_TARGET)"; \
 	if [ ! -d "$(GHOSTTY)/zig-out/share/terminfo" ]; then \
 		if [ ! -d "/Applications/Ghostty.app/Contents/Resources" ]; then \
