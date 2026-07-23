@@ -406,7 +406,8 @@ private struct PromptSidebarSessionRow: View {
             HStack(spacing: 9) {
                 Image(systemName: "command").foregroundStyle(PromptTheme.accent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Ctrl-C interrupts remote commands").font(.system(size: 12, weight: .semibold))
+                    Text(agentKind == .codex ? "Ctrl-C interrupts Codex turns" : "Ctrl-C interrupts remote commands")
+                        .font(.system(size: 12, weight: .semibold))
                     Text("Use ⌘W to close this session.").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
