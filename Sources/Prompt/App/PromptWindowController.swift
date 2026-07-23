@@ -12,6 +12,71 @@ enum PromptTheme {
     static let accent = Color(red: 0.063, green: 0.639, blue: 0.498)
 }
 
+/// Keeps AppKit's responder chain aligned with Prompt's input model.
+///
+/// Ghostty surfaces are native AppKit views embedded in SwiftUI. SwiftUI can
+/// leave a sidebar control (or a previously focused surface) as first
+/// responder after the visible workspace has changed. That makes ordinary
+/// typing appear to disappear. The command palette is the one exception: it
+/// owns keyboard input for its complete lifetime, including its Cmd-K actions
+/// popover.
+@MainActor
+private final class PromptWindow: NSWindow {
+    weak var workspaceStore: PromptWorkspaceStore?
+
+    override func sendEvent(_ event: NSEvent) {
+        guard event.type == .keyDown, let workspaceStore else {
+            super.sendEvent(event)
+            return
+        }
+
+        if workspaceStore.isCommandPalettePresented {
+            // Some palette pages (for example the sidebar editor) intentionally
+            // have no text field. Their local monitors handle navigation; do
+            // not let any unhandled characters fall through to the terminal.
+            guard focusPaletteInputIfAvailable() else { return }
+        } else if let session = workspaceStore.workspace.sessions.first(where: {
+            $0.id == workspaceStore.workspace.focusedSessionID
+        }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
+            // Application shortcuts are consumed by the local shortcut router
+            // before they arrive here. Every remaining key belongs to the
+            // active terminal, even if a SwiftUI control was clicked earlier.
+            surface.focus()
+        }
+
+        super.sendEvent(event)
+    }
+
+    @discardableResult
+    private func focusPaletteInputIfAvailable() -> Bool {
+        // The palette's search and folder-path fields are native NSTextFields.
+        // Focusing the visible editable field immediately before dispatching
+        // each event closes the SwiftUI/AppKit focus race and prevents the
+        // underlying terminal from receiving palette input.
+        guard let field = firstVisibleEditableTextField(in: contentView) else { return false }
+        // NSTextField uses a shared NSTextView field editor as the actual
+        // first responder. Calling makeFirstResponder on an already active
+        // field selects its full contents, so doing that for every keyDown
+        // turns typing "hello" into five replacements. Only reclaim focus
+        // after it has genuinely moved outside the palette field.
+        if firstResponder !== field, firstResponder !== field.currentEditor() {
+            makeFirstResponder(field)
+        }
+        return true
+    }
+
+    private func firstVisibleEditableTextField(in view: NSView?) -> NSTextField? {
+        guard let view, !view.isHidden else { return nil }
+        if let field = view as? NSTextField, field.isEditable, field.isEnabled {
+            return field
+        }
+        for subview in view.subviews {
+            if let field = firstVisibleEditableTextField(in: subview) { return field }
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class PromptWindowController: NSWindowController, ObservableObject {
     let store: PromptWorkspaceStore
@@ -25,7 +90,8 @@ final class PromptWindowController: NSWindowController, ObservableObject {
         self.store = store
         let root = PromptWorkspaceView(store: store)
         let hosting = NSHostingController(rootView: root)
-        let window = NSWindow(contentViewController: hosting)
+        let window = PromptWindow(contentViewController: hosting)
+        window.workspaceStore = store
         window.title = "Prompt"
         window.setContentSize(NSSize(width: 1180, height: 760))
         window.minSize = NSSize(width: 720, height: 440)
