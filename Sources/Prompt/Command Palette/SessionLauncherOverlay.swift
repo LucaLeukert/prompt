@@ -248,7 +248,7 @@ struct PromptRemoteSession: Codable, Hashable {
             logger.error("Tailscale executable was not found")
             return lastSuccessfulHosts
         }
-        for attempt in 1...3 {
+        for attempt in 1 ... 3 {
             let process = Process()
             let output = Pipe()
             let error = Pipe()

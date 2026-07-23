@@ -99,7 +99,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
                 let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
                 let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
 
-                if modifiers == [.command], let number = Int(key), (1...9).contains(number) {
+                if modifiers == [.command], let number = Int(key), (1 ... 9).contains(number) {
                     self.workspaceStore.focusSidebarSession(at: number - 1)
                     return nil
                 }

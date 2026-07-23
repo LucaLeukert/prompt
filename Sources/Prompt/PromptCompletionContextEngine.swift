@@ -354,7 +354,7 @@ private extension PromptCompletionContextEngine {
             for raw in text.split(separator: "\n") {
                 let line = raw.trimmingCharacters(in: .whitespaces)
                 guard line.hasPrefix("alias "), let equals = line.firstIndex(of: "=") else { continue }
-                let alias = line[line.index(line.startIndex, offsetBy: 6)..<equals].trimmingCharacters(in: .whitespaces)
+                let alias = line[line.index(line.startIndex, offsetBy: 6) ..< equals].trimmingCharacters(in: .whitespaces)
                 guard !alias.isEmpty, fragment.isEmpty || alias.lowercased().hasPrefix(fragment.lowercased()) else { continue }
                 result.append(alias)
             }
@@ -655,7 +655,7 @@ private extension PromptCompletionContextEngine {
                 guard let field = raw.split(separator: " ").first, !field.hasPrefix("|") else { continue }
                 for rawHost in field.split(separator: ",") {
                     let host = String(rawHost)
-                    if host.hasPrefix("["), let end = host.firstIndex(of: "]") { result.append(String(host[host.index(after: host.startIndex)..<end])) }
+                    if host.hasPrefix("["), let end = host.firstIndex(of: "]") { result.append(String(host[host.index(after: host.startIndex) ..< end])) }
                     else { result.append(host) }
                 }
             }

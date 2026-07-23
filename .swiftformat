@@ -1,0 +1,4 @@
+--swiftversion 5.0
+--indent 4
+--exclude Vendor,DerivedData,Artifacts
+--rules consecutiveBlankLines,emptyBraces,linebreakAtEndOfFile,spaceAroundBraces,spaceAroundBrackets,spaceAroundOperators,spaceAroundParens,spaceInsideBraces,spaceInsideBrackets,spaceInsideComments,spaceInsideGenerics,spaceInsideParens,trailingSpace

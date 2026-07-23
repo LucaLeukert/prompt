@@ -15,6 +15,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint and format
+    runs-on: macos-26
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: make lint-install
+
+      - name: Run linters
+        run: make lint
+
   build-and-test:
     name: Validate repository wiring
     runs-on: ubuntu-latest

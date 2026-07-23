@@ -84,9 +84,15 @@ Other useful commands are:
 ```sh
 make build  # build without launching
 make test   # run the Prompt test suite
+make format # apply Swift formatting
+make lint   # check Swift formatting/rules and GitHub Actions
 make clean  # remove repo-local generated build output
 make help   # show the command summary
 ```
+
+Install the local formatting and lint tools once with `make lint-install`.
+Prompt uses SwiftFormat, SwiftLint, and actionlint with checked-in repository
+configuration. CI runs the same `make lint` target used locally.
 
 All generated development state stays under `Artifacts/`, `DerivedData/`, and
 the checked-out Ghostty submodule in this repository. Prompt-owned fonts and

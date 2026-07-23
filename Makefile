@@ -12,7 +12,7 @@ APP := $(ARTIFACT_DIR)/Prompt.app
 EXECUTABLE := $(APP)/Contents/MacOS/Prompt
 ZIG := /opt/homebrew/opt/zig@0.15/bin/zig
 
-.PHONY: help build run test xcode clean prepare sync check-app
+.PHONY: help build run test lint format lint-install xcode clean prepare sync check-app
 
 help:
 	@echo "Prompt local development"
@@ -20,6 +20,9 @@ help:
 	@echo "  make run    Rebuild and launch $(APP)"
 	@echo "  make build  Build the complete app bundle"
 	@echo "  make test   Run the Prompt test suite"
+	@echo "  make lint   Check Swift formatting, Swift rules, and Actions"
+	@echo "  make format Apply the repository Swift formatting rules"
+	@echo "  make lint-install  Install local lint and format tools"
 	@echo "  make xcode  Prepare and open the native Xcode workspace"
 	@echo "  make clean  Remove repo-local generated output"
 	@echo
@@ -112,6 +115,22 @@ test: prepare
 		-disableAutomaticPackageResolution \
 		-onlyUsePackageVersionsFromResolvedFile \
 		CODE_SIGNING_ALLOWED=NO
+
+lint:
+	@command -v swiftformat >/dev/null || { echo "Missing swiftformat; run: make lint-install" >&2; exit 1; }
+	@command -v swiftlint >/dev/null || { echo "Missing swiftlint; run: make lint-install" >&2; exit 1; }
+	@command -v actionlint >/dev/null || { echo "Missing actionlint; run: make lint-install" >&2; exit 1; }
+	swiftformat Sources Tests --lint --reporter github-actions-log
+	swiftlint lint --strict
+	actionlint
+	git diff --check
+
+format:
+	@command -v swiftformat >/dev/null || { echo "Missing swiftformat; run: make lint-install" >&2; exit 1; }
+	swiftformat Sources Tests
+
+lint-install:
+	HOMEBREW_NO_AUTO_UPDATE=1 brew install swiftformat swiftlint actionlint
 
 xcode: prepare
 	open "$(ROOT)/Prompt.xcworkspace"

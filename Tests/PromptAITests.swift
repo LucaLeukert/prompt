@@ -457,12 +457,12 @@ struct PromptAITests {
     @Test func completionContextHasAHardSizeBudget() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let dependencies = (0..<1_000).map { "\"dependency-\($0)\":\"1.0.0\"" }.joined(separator: ",")
+        let dependencies = (0 ..< 1_000).map { "\"dependency-\($0)\":\"1.0.0\"" }.joined(separator: ",")
         try "{\"dependencies\":{\(dependencies)}}".write(
             to: root.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let terminal = (0..<200).map { "long-output-\($0)-" + String(repeating: "x", count: 250) }.joined(separator: "\n")
+        let terminal = (0 ..< 200).map { "long-output-\($0)-" + String(repeating: "x", count: 250) }.joined(separator: "\n")
         let context = PromptCompletionContextEngine.build(prefix: "npm run bu", cwd: root.path, terminal: terminal)
         #expect(context.document.count < 19_000)
         #expect(context.document.split(separator: "\n", omittingEmptySubsequences: false)[context.commandLine] == "npm run bu")
@@ -556,7 +556,7 @@ struct PromptAITests {
         let existing = root.appendingPathComponent("existing")
         let original = Data("safe".utf8)
         try original.write(to: existing)
-        let targets = (0..<8).map { root.appendingPathComponent("created-\($0)") }
+        let targets = (0 ..< 8).map { root.appendingPathComponent("created-\($0)") }
         let payloads = [
             "touch \(targets[0].path)",
             "printf owned > \(targets[1].path)",

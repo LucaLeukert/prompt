@@ -1,0 +1,21 @@
+included:
+  - Sources
+  - Tests
+
+only_rules:
+  - closing_brace
+  - colon
+  - comma
+  - empty_count
+  - empty_string
+  - legacy_constructor
+  - opening_brace
+  - operator_usage_whitespace
+  - return_arrow_whitespace
+  - trailing_newline
+  - trailing_semicolon
+  - trailing_whitespace
+  - vertical_whitespace
+  - void_return
+
+reporter: xcode

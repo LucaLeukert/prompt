@@ -257,7 +257,7 @@ final class PromptWorkspaceStore: ObservableObject {
         guard descriptors.count > 1 else { return .leaf(fallbackPane) }
 
         let orderedX = descriptors.sorted { $0.left < $1.left }
-        for index in 1..<orderedX.count {
+        for index in 1 ..< orderedX.count {
             let left = Array(orderedX[..<index])
             let right = Array(orderedX[index...])
             let leftEdge = left.map { $0.left + $0.width }.max() ?? 0
@@ -276,7 +276,7 @@ final class PromptWorkspaceStore: ObservableObject {
         }
 
         let orderedY = descriptors.sorted { $0.top < $1.top }
-        for index in 1..<orderedY.count {
+        for index in 1 ..< orderedY.count {
             let top = Array(orderedY[..<index])
             let bottom = Array(orderedY[index...])
             let topEdge = top.map { $0.top + $0.height }.max() ?? 0
