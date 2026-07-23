@@ -377,26 +377,48 @@ private struct PromptSidebarSessionRow: View {
     }
 
     var body: some View {
-        Button { store.focus(sessionID: session.id, paneID: session.focusedPaneID) } label: {
-            Group {
-                if let agentKind { agentRow(agentKind) } else { standardRow }
+        ZStack(alignment: .bottomTrailing) {
+            Button { store.focus(sessionID: session.id, paneID: session.focusedPaneID) } label: {
+                Group {
+                    if let agentKind { agentRow(agentKind) } else { standardRow }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: 58)
+                .contentShape(Rectangle())
+                .scaleEffect(hovering ? 1.012 : 1, anchor: .leading)
+                .offset(x: hovering ? 3 : 0)
+                .animation(.spring(response: 0.18, dampingFraction: 0.72), value: hovering)
+                .background(
+                    session.id == store.workspace.focusedSessionID
+                        ? PromptTheme.selection
+                        : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(
+                    session.id == store.workspace.focusedSessionID ? PromptTheme.border : .clear,
+                    lineWidth: 0.5))
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 58)
-            .contentShape(Rectangle())
-            .scaleEffect(hovering ? 1.012 : 1, anchor: .leading)
-            .offset(x: hovering ? 3 : 0)
-            .animation(.spring(response: 0.18, dampingFraction: 0.72), value: hovering)
-            .background(
-                session.id == store.workspace.focusedSessionID
-                    ? PromptTheme.selection
-                    : Color.clear,
-                in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(
-                session.id == store.workspace.focusedSessionID ? PromptTheme.border : .clear,
-                lineWidth: 0.5))
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            if let pullRequest {
+                Link(destination: pullRequest.url) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.triangle.pull")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("#\(pullRequest.number)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    }
+                    .foregroundStyle(pullRequestColor)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(pullRequest.title) · Open on GitHub")
+                .padding(.trailing, 8)
+                .padding(.bottom, 6)
+            }
         }
-        .buttonStyle(.plain).frame(maxWidth: .infinity)
         .onHover {
             hovering = $0
             showsAgentCard = $0 && agentKind != nil
@@ -484,13 +506,12 @@ private struct PromptSidebarSessionRow: View {
             }
             HStack(spacing: 6) {
                 if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
-                    Text(branch).font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1)
+                    Text(branch)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .lineLimit(1)
+                        .padding(.trailing, pullRequest == nil ? 0 : 38)
                 } else {
                     Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
-                }
-                if let pullRequest {
-                    Text("#\(pullRequest.number)").font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(pullRequestColor)
-                    Image(systemName: pullRequest.isDraft ? "pencil" : "arrow.triangle.pull").font(.system(size: 10, weight: .semibold)).foregroundStyle(pullRequestColor)
                 }
             }
             .foregroundStyle(.tertiary)
@@ -501,8 +522,12 @@ private struct PromptSidebarSessionRow: View {
 
     private var pullRequestColor: Color {
         guard let pullRequest else { return .secondary }
-        if pullRequest.isDraft { return Color.orange }
-        switch pullRequest.state { case "MERGED": return Color.purple; case "CLOSED": return Color.red; default: return PromptTheme.accent }
+        if pullRequest.isDraft { return Color.secondary }
+        switch pullRequest.state {
+        case "MERGED": return Color.purple
+        case "CLOSED": return Color.red
+        default: return Color.green
+        }
     }
 
     private var agentHoverCard: some View {
@@ -587,7 +612,10 @@ private struct PromptSidebarSessionRow: View {
 
     private var metadataLine: some View {
         HStack(spacing: 5) {
-            Text(metadata).font(.system(size: 10, design: .monospaced)).lineLimit(1)
+            Text(metadata)
+                .font(.system(size: 10, design: .monospaced))
+                .lineLimit(1)
+                .padding(.trailing, pullRequest == nil ? 0 : 38)
             let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
             if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
         }.foregroundStyle(.tertiary)

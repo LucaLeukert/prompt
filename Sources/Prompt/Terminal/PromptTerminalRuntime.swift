@@ -542,6 +542,7 @@ final class PromptTerminalRuntime: ObservableObject {
         let title: String
         let isDraft: Bool
         let state: String
+        let url: URL
     }
     struct SidebarCodexThread: Equatable {
         let id: String
@@ -892,7 +893,7 @@ final class PromptTerminalRuntime: ObservableObject {
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(fileURLWithPath: executable)
-            process.arguments = ["pr", "view", "--head", branch, "--json", "number,title,isDraft,state"]
+            process.arguments = ["pr", "view", branch, "--json", "number,title,isDraft,state,url"]
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
@@ -902,8 +903,15 @@ final class PromptTerminalRuntime: ObservableObject {
                   let object = try? JSONSerialization.jsonObject(with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any],
                   let number = object["number"] as? Int,
                   let title = object["title"] as? String,
-                  let state = object["state"] as? String else { return nil }
-            return SidebarPullRequest(number: number, title: title, isDraft: object["isDraft"] as? Bool ?? false, state: state)
+                  let state = object["state"] as? String,
+                  let urlString = object["url"] as? String,
+                  let url = URL(string: urlString) else { return nil }
+            return SidebarPullRequest(
+                number: number,
+                title: title,
+                isDraft: object["isDraft"] as? Bool ?? false,
+                state: state,
+                url: url)
         }.value
     }
 
