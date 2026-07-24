@@ -531,9 +531,12 @@ struct PromptAITests {
         }
         #expect(PromptInputClassifier.classify("what --help") == .shell)
         #expect(PromptInputClassifier.classify("what is $PATH") == .shell)
-        #expect(PromptInputClassifier.classify("explain this repository") == .ai)
-        #expect(PromptInputClassifier.classify("okay can you inspect this") == .ai)
-        #expect(PromptInputClassifier.classify("review the changes") == .ai)
+        #expect(PromptInputClassifier.classify(
+            "explain this repository", shell: "/bin/zsh") == .ai)
+        #expect(PromptInputClassifier.classify(
+            "okay can you inspect this", shell: "/bin/zsh") == .ai)
+        #expect(PromptInputClassifier.classify(
+            "review the changes", shell: "/bin/zsh") == .ai)
         #expect(PromptInputClassifier.classify("cd src/prompt") == .shell)
         #expect(PromptInputClassifier.classify(
             "vi ~/.ssh/known_hosts", shell: "/bin/zsh", cwd: "/tmp") == .shell)

@@ -1,3 +1,4 @@
 [submodule "Vendor/ghostty"]
 	path = Vendor/ghostty
 	url = https://github.com/ghostty-org/ghostty.git
+	ignore = dirty
