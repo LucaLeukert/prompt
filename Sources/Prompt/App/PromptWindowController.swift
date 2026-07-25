@@ -19,6 +19,7 @@ enum PromptKeyboardFocusRouting {
         if let textField = responder as? NSTextField { return textField.isEditable && textField.isEnabled }
         return false
     }
+
 }
 
 /// Keeps AppKit's responder chain aligned with Prompt's input model.
@@ -40,9 +41,13 @@ private final class PromptWindow: NSWindow {
         }
 
         if workspaceStore.isCommandPalettePresented {
+            // Resolve palette navigation before AppKit dispatches to the
+            // previous first responder. A focused Ghostty surface or field
+            // editor can therefore never claim arrows, Return, or Escape.
+            if workspaceStore.commandPaletteKeyRouter?.handle(event) == true { return }
             // Some palette pages (for example the sidebar editor) intentionally
-            // have no text field. Their local monitors handle navigation; do
-            // not let any unhandled characters fall through to the terminal.
+            // have no text field. The palette router above handles navigation;
+            // do not let any unhandled characters fall through to the terminal.
             guard focusPaletteInputIfAvailable() else { return }
         } else if !PromptKeyboardFocusRouting.preservesEditableControl(firstResponder),
                   let session = workspaceStore.workspace.sessions.first(where: {

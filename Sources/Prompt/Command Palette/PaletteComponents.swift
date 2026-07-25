@@ -54,6 +54,13 @@ struct PromptCommandAction: Identifiable {
     let action: () -> Void
 }
 
+enum PromptCommandBehavior {
+    case perform(() -> Void)
+    case submenu(() -> [PromptCommandOption])
+    case folder(PromptFolderPickerConfiguration)
+    case sidebar(PromptWorkspaceStore)
+}
+
 struct PromptCommandOption: Identifiable, Hashable {
     /// Unique identifier for this option.
     let id = UUID()
@@ -77,13 +84,9 @@ struct PromptCommandOption: Identifiable, Hashable {
     let emphasis: Bool
     /// Sort key for stable ordering when titles are equal.
     let sortKey: AnySortKey?
-    /// The action to perform when this option is selected.
-    let action: () -> Void
-    /// Child options shown inside this same palette surface.
-    let children: (() -> [PromptCommandOption])?
-    /// A purpose-built folder browser shown inside this palette.
-    let folderPicker: PromptFolderPickerConfiguration?
-    let sidebarEditor: PromptWorkspaceStore?
+    /// What selecting this option does. Every command uses the same typed
+    /// behavior model, whether it performs work or opens another palette route.
+    let behavior: PromptCommandBehavior
     /// Actions shown by Cmd-K for this exact command. These travel with an
     /// option into child pages instead of falling back to palette-wide actions.
     let contextualActions: (() -> [PromptCommandAction])?
@@ -114,10 +117,7 @@ struct PromptCommandOption: Identifiable, Hashable {
         self.badge = badge
         self.emphasis = emphasis
         self.sortKey = sortKey
-        self.action = action
-        self.children = nil
-        self.folderPicker = nil
-        self.sidebarEditor = nil
+        self.behavior = .perform(action)
         self.contextualActions = contextualActions
         self.primaryActionTitle = primaryActionTitle ?? title
     }
@@ -143,10 +143,7 @@ struct PromptCommandOption: Identifiable, Hashable {
         self.badge = nil
         self.emphasis = false
         self.sortKey = nil
-        self.action = {}
-        self.children = children
-        self.folderPicker = nil
-        self.sidebarEditor = nil
+        self.behavior = .submenu(children)
         self.contextualActions = contextualActions
         self.primaryActionTitle = primaryActionTitle ?? "Open \(title)"
     }
@@ -171,10 +168,7 @@ struct PromptCommandOption: Identifiable, Hashable {
         self.badge = nil
         self.emphasis = false
         self.sortKey = nil
-        self.action = {}
-        self.children = nil
-        self.folderPicker = folderPicker
-        self.sidebarEditor = nil
+        self.behavior = .folder(folderPicker)
         self.contextualActions = contextualActions
         self.primaryActionTitle = primaryActionTitle ?? "Browse \(title)"
     }
@@ -190,10 +184,7 @@ struct PromptCommandOption: Identifiable, Hashable {
         self.badge = nil
         self.emphasis = false
         self.sortKey = nil
-        self.action = {}
-        self.children = nil
-        self.folderPicker = nil
-        self.sidebarEditor = sidebarEditor
+        self.behavior = .sidebar(sidebarEditor)
         self.contextualActions = contextualActions
         self.primaryActionTitle = "Edit sidebar"
     }
@@ -205,24 +196,129 @@ struct PromptCommandOption: Identifiable, Hashable {
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
+
+    var opensRoute: Bool {
+        switch behavior {
+        case .perform: false
+        case .submenu, .folder, .sidebar: true
+        }
+    }
+}
+
+enum PromptPaletteRoute {
+    case commands(title: String, options: [PromptCommandOption])
+    case folder(PromptFolderPickerConfiguration)
+    case sidebar(PromptWorkspaceStore)
+}
+
+struct PromptPaletteNavigation {
+    private(set) var routes: [PromptPaletteRoute] = []
+
+    var current: PromptPaletteRoute? { routes.last }
+    var isAtRoot: Bool { routes.isEmpty }
+
+    mutating func push(_ route: PromptPaletteRoute) {
+        routes.append(route)
+    }
+
+    @discardableResult
+    mutating func pop() -> Bool {
+        guard !routes.isEmpty else { return false }
+        routes.removeLast()
+        return true
+    }
+
+    mutating func reset() {
+        routes.removeAll()
+    }
+}
+
+@MainActor
+final class PromptPaletteKeyboardRouter: ObservableObject {
+    enum Command {
+        case moveUp
+        case moveDown
+        case submit
+        case back
+        case delete
+        case actions
+        case textInput
+    }
+
+    private var activeOwner: UUID?
+    private var handler: ((Command) -> Bool)?
+
+    func claim(owner: UUID, handler: @escaping (Command) -> Bool) {
+        activeOwner = owner
+        self.handler = handler
+    }
+
+    func release(owner: UUID) {
+        guard activeOwner == owner else { return }
+        activeOwner = nil
+        handler = nil
+    }
+
+    func dispatch(_ command: Command) -> Bool {
+        handler?(command) == true
+    }
+
+    func handle(_ event: NSEvent) -> Bool {
+        guard let command = command(for: event) else {
+            _ = dispatch(.textInput)
+            return false
+        }
+        return dispatch(command)
+    }
+
+    private func command(for event: NSEvent) -> Command? {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers == [.command], event.charactersIgnoringModifiers?.lowercased() == "k" {
+            return .actions
+        }
+        if modifiers == [.control] {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "p": return .moveUp
+            case "n": return .moveDown
+            default: return nil
+            }
+        }
+        guard modifiers.isEmpty else { return nil }
+        switch event.keyCode {
+        case 126: return .moveUp
+        case 125: return .moveDown
+        case 36, 76: return .submit
+        case 53: return .back
+        case 51: return .delete
+        default: return nil
+        }
+    }
+
 }
 
 struct PromptCommandPaletteContentView: View {
+    @ObservedObject var store: PromptWorkspaceStore
     @Binding var isPresented: Bool
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
     var options: [PromptCommandOption]
     @State private var rawQuery = ""
     @State private var selectedIndex: UInt? = 0
-    @State private var pages: [(title: String, options: [PromptCommandOption])] = []
-    @State private var folderPicker: PromptFolderPickerConfiguration?
-    @State private var sidebarEditor: PromptWorkspaceStore?
+    @State private var navigation = PromptPaletteNavigation()
     @State private var actionsArePresented = false
-    @State private var suppressesTransitionFocusLoss = false
     @State private var submitGate = PromptPaletteSubmitGate()
     @State private var pointerLocationAtKeyboardNavigation: CGPoint?
     @State private var pointerTrackingStarted = false
+    @State private var keyboardOwner = UUID()
+    @StateObject private var keyboard = PromptPaletteKeyboardRouter()
 
-    private var visibleOptions: [PromptCommandOption] { pages.last?.options ?? options }
+    private var commandRoute: (title: String?, options: [PromptCommandOption]) {
+        if case .some(.commands(let title, let options)) = navigation.current {
+            return (title, options)
+        }
+        return (nil, options)
+    }
+
+    private var visibleOptions: [PromptCommandOption] { commandRoute.options }
 
     var query: String {
         rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -267,59 +363,29 @@ struct PromptCommandPaletteContentView: View {
         }
 
         PromptGlassEffectContainer(spacing: 18) {
-            if let sidebarEditor {
-                PromptSidebarVisualEditor(store: sidebarEditor, onBack: { self.sidebarEditor = nil })
-            } else if let folderPicker {
+            if case .some(.sidebar(let sidebarEditor)) = navigation.current {
+                PromptSidebarVisualEditor(
+                    store: sidebarEditor,
+                    keyboard: keyboard,
+                    onBack: leaveSidebarEditor)
+            } else if case .some(.folder(let folderPicker)) = navigation.current {
                 FolderPickerView(
                     configuration: folderPicker,
                     isPresented: $isPresented,
-                    onBack: { self.folderPicker = nil })
+                    keyboard: keyboard,
+                    onBack: leaveFolderPicker)
             } else {
                 ZStack(alignment: .bottomTrailing) {
                     VStack(alignment: .leading, spacing: 0) {
                         CommandPaletteQuery(
                             query: $rawQuery,
-                            title: pages.last?.title,
-                            canGoBack: !pages.isEmpty,
-                            dismissOnFocusLoss: !actionsArePresented,
-                            suppressesFocusLoss: $suppressesTransitionFocusLoss,
-                            onBack: goBack
-                        ) { event in
-                            switch event {
-                            case .exit:
-                                guard !suppressesTransitionFocusLoss else { break }
-                                if pages.isEmpty { isPresented = false } else { goBack() }
-
-                            case .submit:
-                                submitFromKeyboard()
-
-                            case .move(.up):
-                                if filteredOptions.isEmpty { break }
-                                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-                                let current = selectedIndex ?? UInt(filteredOptions.count)
-                                selectedIndex = (current == 0)
-                                    ? UInt(filteredOptions.count - 1)
-                                    : current - 1
-
-                            case .move(.down):
-                                if filteredOptions.isEmpty { break }
-                                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-                                let current = selectedIndex ?? UInt.max
-                                selectedIndex = (current >= UInt(filteredOptions.count - 1))
-                                    ? 0
-                                    : current + 1
-
-                            case .move(.left):
-                                if !pages.isEmpty { goBack() }
-
-                            case .move:
-                                break
+                            title: commandRoute.title,
+                            canGoBack: !navigation.isAtRoot,
+                            onBack: goBack)
+                            .onChange(of: query) { _ in
+                                // Always keep an actionable row selected so Return works immediately.
+                                selectedIndex = filteredOptions.isEmpty ? nil : 0
                             }
-                        }
-                        .onChange(of: query) { _ in
-                            // Always keep an actionable row selected so Return works immediately.
-                            selectedIndex = filteredOptions.isEmpty ? nil : 0
-                        }
 
                         Divider().opacity(0.55)
 
@@ -352,7 +418,7 @@ struct PromptCommandPaletteContentView: View {
                                 } label: {
                                     PaletteHint(
                                         keys: ["↩"],
-                                        label: selectedOption.children == nil && selectedOption.folderPicker == nil && selectedOption.sidebarEditor == nil ? "Run" : "Open")
+                                        label: selectedOption.opensRoute ? "Open" : "Run")
                                 }
                                 .promptGlassButtonStyle()
 
@@ -369,20 +435,15 @@ struct PromptCommandPaletteContentView: View {
                     if actionsArePresented, let selectedOption {
                         CommandActionsView(
                             option: selectedOption,
+                            keyboard: keyboard,
                             onPrimary: { activate(selectedOption) },
-                            onDismiss: { actionsArePresented = false })
+                            onDismiss: dismissActions)
                             .frame(width: 330)
                             .padding(.trailing, 12)
                             .padding(.bottom, 54)
                             .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
                             .zIndex(4)
                     }
-
-                    Button { toggleActions() } label: { Color.clear }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut("k", modifiers: [.command])
-                        .frame(width: 0, height: 0)
-                        .accessibilityHidden(true)
                 }
             }
         }
@@ -393,45 +454,46 @@ struct PromptCommandPaletteContentView: View {
         .padding()
         .environment(\.colorScheme, scheme)
         .onAppear {
+            store.commandPaletteKeyRouter = keyboard
             pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
             pointerTrackingStarted = true
+            claimCommandKeyboard()
         }
         .onChange(of: isPresented) { newValue in
             if newValue {
                 pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
                 pointerTrackingStarted = true
             } else {
-                // This is optional, since most of the time
-                // there will be a delay before the next use.
-                // To keep behavior the same as before, we reset it.
-                pointerTrackingStarted = false
-                rawQuery = ""
-                selectedIndex = 0
-                pages = []
-                folderPicker = nil
-                sidebarEditor = nil
-                actionsArePresented = false
+                resetNavigationState()
             }
+        }
+        // The parent removes this view as soon as `isPresented` becomes false,
+        // so SwiftUI is not guaranteed to deliver the binding change above.
+        // Reset on disappearance as well to prevent a dismissed picker and its
+        // keyboard monitor from leaking into the next presentation.
+        .onDisappear {
+            if store.commandPaletteKeyRouter === keyboard {
+                store.commandPaletteKeyRouter = nil
+            }
+            resetNavigationState()
         }
     }
 
     private func activate(_ option: PromptCommandOption) {
         actionsArePresented = false
-        if let picker = option.folderPicker {
-            beginInternalNavigation()
-            folderPicker = picker
-        } else if let editor = option.sidebarEditor {
-            beginInternalNavigation()
-            sidebarEditor = editor
-        } else if let children = option.children {
+        switch option.behavior {
+        case .folder(let picker):
+            navigation.push(.folder(picker))
+        case .sidebar(let editor):
+            navigation.push(.sidebar(editor))
+        case .submenu(let children):
             let childOptions = children()
-            beginInternalNavigation()
-            pages.append((option.title, childOptions))
+            navigation.push(.commands(title: option.title, options: childOptions))
             rawQuery = ""
             selectedIndex = 0
-        } else {
+        case .perform(let action):
             isPresented = false
-            option.action()
+            action()
         }
     }
 
@@ -443,14 +505,63 @@ struct PromptCommandPaletteContentView: View {
         }
     }
 
-    private func beginInternalNavigation() {
-        suppressesTransitionFocusLoss = true
-        // Replacing the palette's text field temporarily clears AppKit focus.
-        // Ignore only that internal handoff; ordinary focus loss should still
-        // dismiss the palette.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            suppressesTransitionFocusLoss = false
+    private func claimCommandKeyboard() {
+        keyboard.claim(owner: keyboardOwner) { command in
+            switch command {
+            case .moveUp:
+                moveSelectionUp()
+            case .moveDown:
+                moveSelectionDown()
+            case .submit:
+                submitFromKeyboard()
+            case .back:
+                if actionsArePresented {
+                    actionsArePresented = false
+                } else if navigation.isAtRoot {
+                    isPresented = false
+                } else {
+                    goBack()
+                }
+            case .actions:
+                toggleActions()
+            case .delete:
+                return false
+            case .textInput:
+                return false
+            }
+            return true
         }
+    }
+
+    private func moveSelectionUp() {
+        guard !filteredOptions.isEmpty else { return }
+        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+        let current = selectedIndex ?? UInt(filteredOptions.count)
+        selectedIndex = current == 0 ? UInt(filteredOptions.count - 1) : current - 1
+    }
+
+    private func moveSelectionDown() {
+        guard !filteredOptions.isEmpty else { return }
+        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+        let current = selectedIndex ?? UInt.max
+        selectedIndex = current >= UInt(filteredOptions.count - 1) ? 0 : current + 1
+    }
+
+    private func leaveFolderPicker() {
+        goBack()
+    }
+
+    private func leaveSidebarEditor() {
+        goBack()
+    }
+
+    private func resetNavigationState() {
+        pointerTrackingStarted = false
+        rawQuery = ""
+        selectedIndex = 0
+        navigation.reset()
+        actionsArePresented = false
+        submitGate.reset()
     }
 
     private func toggleActions() {
@@ -460,11 +571,16 @@ struct PromptCommandPaletteContentView: View {
         }
     }
 
+    private func dismissActions() {
+        actionsArePresented = false
+        DispatchQueue.main.async { claimCommandKeyboard() }
+    }
+
     private func goBack() {
-        guard !pages.isEmpty else { isPresented = false; return }
-        pages.removeLast()
+        guard navigation.pop() else { isPresented = false; return }
         rawQuery = ""
         selectedIndex = 0
+        DispatchQueue.main.async { claimCommandKeyboard() }
     }
 
     /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
@@ -510,10 +626,11 @@ struct PromptPaletteSubmitGate {
 
 private struct PromptSidebarVisualEditor: View {
     @ObservedObject var store: PromptWorkspaceStore
+    let keyboard: PromptPaletteKeyboardRouter
     let onBack: () -> Void
     @State private var selection: UUID?
     @State private var actionsVisible = false
-    @StateObject private var keyMonitor = PromptSidebarEditorKeyMonitor()
+    @State private var keyboardOwner = UUID()
 
     private var groups: [(String, [PromptSession])] {
         let sessions = store.orderedSessions
@@ -566,30 +683,25 @@ private struct PromptSidebarVisualEditor: View {
                     }.padding(12)
                 }.frame(height: 410)
                 Divider().opacity(0.55)
-                HStack { PaletteHint(keys: ["drag"], label: "Move"); PaletteHint(keys: ["⌘", "K"], label: "Actions"); Spacer(); Text("Changes apply instantly").foregroundStyle(.tertiary) }
+                HStack { PaletteHint(keys: ["drag"], label: "Move"); PaletteHint(keys: ["⌘", "K"], label: "Actions"); PaletteHint(keys: ["esc"], label: "Back"); Spacer(); Text("Changes apply instantly").foregroundStyle(.tertiary) }
                     .font(.system(size: 11, weight: .medium)).padding(.horizontal, 18).frame(height: 48)
             }
             if actionsVisible, let session = selectedSession {
                 CommandActionsView(
                     option: actionOption(session),
+                    keyboard: keyboard,
                     onPrimary: { store.focus(sessionID: session.id, paneID: session.focusedPaneID) },
-                    onDismiss: { actionsVisible = false },
+                    onDismiss: dismissActions,
                     customActions: actionItems(session))
                     .frame(width: 330).padding(.trailing, 12).padding(.bottom, 54)
                     .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
             }
         }
-        .onAppear { if selection == nil { selection = sessions.first?.id } }
-        .onChange(of: actionsVisible) { keyMonitor.actionsVisible = $0 }
-        .onReceive(keyMonitor.$action.compactMap { $0 }) { action in
-            switch action {
-            case .up: moveSelection(-1)
-            case .down: moveSelection(1)
-            case .actions:
-                if selectedSession != nil { withAnimation(.easeOut(duration: 0.14)) { actionsVisible.toggle() } }
-            }
-            keyMonitor.action = nil
+        .onAppear {
+            if selection == nil { selection = sessions.first?.id }
+            claimKeyboard()
         }
+        .onDisappear { keyboard.release(owner: keyboardOwner) }
     }
 
     private var selectedSession: PromptSession? { selection.flatMap { id in store.workspace.sessions.first { $0.id == id } } }
@@ -629,6 +741,37 @@ private struct PromptSidebarVisualEditor: View {
         actionsVisible = false
     }
 
+    private func claimKeyboard() {
+        keyboard.claim(owner: keyboardOwner) { command in
+            switch command {
+            case .moveUp: moveSelection(-1)
+            case .moveDown: moveSelection(1)
+            case .actions:
+                if selectedSession != nil {
+                    withAnimation(.easeOut(duration: 0.14)) { actionsVisible.toggle() }
+                }
+            case .back:
+                if actionsVisible { actionsVisible = false } else { onBack() }
+            case .submit:
+                if let selectedSession {
+                    store.focus(
+                        sessionID: selectedSession.id,
+                        paneID: selectedSession.focusedPaneID)
+                }
+            case .delete:
+                return false
+            case .textInput:
+                return false
+            }
+            return true
+        }
+    }
+
+    private func dismissActions() {
+        actionsVisible = false
+        DispatchQueue.main.async { claimKeyboard() }
+    }
+
     @ViewBuilder private func sessionMenu(_ session: PromptSession) -> some View { Button("Rename…") { rename(session) }; Menu("Move to group") { moveMenu(session) }; Divider(); Button("Close Session", role: .destructive) { store.closeSession(session.id) } }
     @ViewBuilder private func moveMenu(_ session: PromptSession) -> some View { Button("Automatic") { store.assignSession(session.id, to: nil) }; ForEach(store.sidebarFolders, id: \.self) { folder in Button(folder) { store.assignSession(session.id, to: folder) } } }
     @ViewBuilder private func folderMenu(_ name: String) -> some View { if store.sidebarFolders.contains(name) { Button("Rename…") { renameFolder(name) }; Button("Delete Folder", role: .destructive) { store.deleteSidebarFolder(name) } } }
@@ -636,33 +779,6 @@ private struct PromptSidebarVisualEditor: View {
     private func createFolder() { if let value = PromptSidebarPrompts.text(title: "New sidebar folder", value: "") { store.createSidebarFolder(named: value) } }
     private func rename(_ session: PromptSession) { if let value = PromptSidebarPrompts.text(title: "Rename session", value: session.title) { store.renameSession(session.id, to: value) } }
     private func renameFolder(_ name: String) { if let value = PromptSidebarPrompts.text(title: "Rename folder", value: name) { store.renameSidebarFolder(name, to: value) } }
-}
-
-@MainActor
-private final class PromptSidebarEditorKeyMonitor: ObservableObject {
-    enum Action { case up, down, actions }
-    @Published var action: Action?
-    var actionsVisible = false
-    private var monitor: Any?
-
-    init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                if event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command],
-                   event.charactersIgnoringModifiers?.lowercased() == "k" {
-                    self?.action = .actions
-                    return nil
-                }
-                guard event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return event }
-                if self?.actionsVisible == true { return event }
-                if event.keyCode == 126 { self?.action = .up; return nil }
-                if event.keyCode == 125 { self?.action = .down; return nil }
-                return event
-            }
-        }
-    }
-
-    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 }
 
 struct PromptFolderPickerEntry: Identifiable, Hashable {
@@ -730,6 +846,7 @@ enum PromptFolderPath {
 private struct FolderPickerView: View {
     let configuration: PromptFolderPickerConfiguration
     @Binding var isPresented: Bool
+    let keyboard: PromptPaletteKeyboardRouter
     let onBack: () -> Void
 
     @State private var directory: String
@@ -739,12 +856,19 @@ private struct FolderPickerView: View {
     @State private var loadError: String?
     @State private var isLoading = false
     @State private var prefersParentSelection = false
-    @StateObject private var keyMonitor = PromptFolderPickerKeyMonitor()
+    @State private var keyboardOwner = UUID()
+    @State private var isListNavigationActive = false
     @FocusState private var pathFocused: Bool
 
-    init(configuration: PromptFolderPickerConfiguration, isPresented: Binding<Bool>, onBack: @escaping () -> Void) {
+    init(
+        configuration: PromptFolderPickerConfiguration,
+        isPresented: Binding<Bool>,
+        keyboard: PromptPaletteKeyboardRouter,
+        onBack: @escaping () -> Void
+    ) {
         self.configuration = configuration
         _isPresented = isPresented
+        self.keyboard = keyboard
         self.onBack = onBack
         _directory = State(initialValue: configuration.initialDirectory)
         _pathField = State(initialValue: configuration.displayName(configuration.initialDirectory))
@@ -784,7 +908,7 @@ private struct FolderPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
-                Button(action: onBack) {
+                Button(action: leavePicker) {
                     Image(systemName: "arrow.left")
                         .font(.system(size: 16, weight: .medium))
                         .frame(width: 24, height: 28)
@@ -893,18 +1017,13 @@ private struct FolderPickerView: View {
                     }
                 }
             }
-            .onMoveCommand { direction in
-                moveSelection(direction)
-            }
-            .onSubmit { openSelected() }
-
             Divider().opacity(0.55)
 
             HStack(spacing: 14) {
                 PaletteHint(keys: ["↑", "↓"], label: "Navigate")
                 PaletteHint(keys: ["↩"], label: "Open")
                 PaletteHint(keys: ["⌫"], label: "Back")
-                PaletteHint(keys: ["esc"], label: "Close")
+                PaletteHint(keys: ["esc"], label: "Back")
                 Spacer()
                 if let onReveal = configuration.onReveal {
                     Button("Open in Finder") { onReveal(directory) }
@@ -916,18 +1035,12 @@ private struct FolderPickerView: View {
             .padding(.horizontal, 18)
             .frame(height: 48)
         }
-        .onExitCommand { isPresented = false }
         .task(id: directory) { await loadDirectory() }
-        .onAppear { DispatchQueue.main.async { pathFocused = false } }
-        .onReceive(keyMonitor.$action.compactMap { $0 }) { action in
-            switch action {
-            case .up: moveSelection(.up)
-            case .down: moveSelection(.down)
-            case .open: openSelected()
-            case .parent: goToParent()
-            }
-            keyMonitor.action = nil
+        .onAppear {
+            claimKeyboard()
+            DispatchQueue.main.async { pathFocused = false }
         }
+        .onDisappear { keyboard.release(owner: keyboardOwner) }
     }
 
     private func openSelected() {
@@ -937,6 +1050,11 @@ private struct FolderPickerView: View {
         }
         let offset = selectedIndex - (parentPath == nil ? 0 : 1)
         if visibleEntries.indices.contains(offset) { activate(visibleEntries[offset]) }
+    }
+
+    private func leavePicker() {
+        keyboard.release(owner: keyboardOwner)
+        onBack()
     }
 
     private func activate(_ entry: PromptFolderPickerEntry) {
@@ -960,6 +1078,7 @@ private struct FolderPickerView: View {
         // Arrow navigation deliberately leaves path editing and hands focus to
         // the directory list, so the following Return opens the highlighted row.
         pathFocused = false
+        isListNavigationActive = true
         let count = visibleEntries.count + (parentPath == nil ? 0 : 1)
         guard count > 0 else { return }
         if direction == .up { selectedIndex = selectedIndex == 0 ? count - 1 : selectedIndex - 1 }
@@ -969,6 +1088,28 @@ private struct FolderPickerView: View {
     private func goToParent() {
         guard let parentPath else { return }
         navigate(to: parentPath, preferringParent: true)
+    }
+
+    private func claimKeyboard() {
+        keyboard.claim(owner: keyboardOwner) { command in
+            switch command {
+            case .moveUp: moveSelection(.up)
+            case .moveDown: moveSelection(.down)
+            case .submit: openSelected()
+            case .back: leavePicker()
+            case .delete:
+                guard PromptFolderPickerKeyboardPolicy.shouldNavigateToParent(
+                    isListNavigationActive: isListNavigationActive
+                ) else { return false }
+                goToParent()
+            case .actions:
+                return false
+            case .textInput:
+                isListNavigationActive = false
+                return false
+            }
+            return true
+        }
     }
 
     private func choose(_ value: String) {
@@ -1029,61 +1170,6 @@ enum PromptFolderPickerKeyboardPolicy {
     }
 }
 
-@MainActor
-private final class PromptFolderPickerKeyMonitor: ObservableObject {
-    enum Action { case up, down, open, parent }
-
-    @Published var action: Action?
-    private var isListNavigationActive = false
-    private var keyMonitor: Any?
-    private var mouseMonitor: Any?
-
-    init() {
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard let self else { return event }
-                guard event.modifierFlags
-                    .intersection([.command, .shift, .option, .control]).isEmpty
-                else { return event }
-                switch event.keyCode {
-                case 126:
-                    self.isListNavigationActive = true
-                    self.action = .up
-                case 125:
-                    self.isListNavigationActive = true
-                    self.action = .down
-                case 36, 76:
-                    self.action = .open
-                case 51:
-                    guard PromptFolderPickerKeyboardPolicy.shouldNavigateToParent(
-                        isListNavigationActive: self.isListNavigationActive
-                    ) else { return event }
-                    self.action = .parent
-                default:
-                    // Typing resumes direct path editing, so subsequent
-                    // Backspace belongs to the field editor.
-                    self.isListNavigationActive = false
-                    return event
-                }
-                return nil
-            }
-        }
-        mouseMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown]
-        ) { [weak self] event in
-            MainActor.assumeIsolated {
-                self?.isListNavigationActive = false
-                return event
-            }
-        }
-    }
-
-    deinit {
-        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
-    }
-}
-
 private struct FolderPickerRow: View {
     let name: String
     var subtitle: String? = nil
@@ -1121,13 +1207,14 @@ private struct FolderPickerRow: View {
 
 private struct CommandActionsView: View {
     let option: PromptCommandOption
+    let keyboard: PromptPaletteKeyboardRouter
     let onPrimary: () -> Void
     let onDismiss: () -> Void
     var customActions: [PromptCommandAction]? = nil
 
     @State private var query = ""
     @State private var selectedIndex = 0
-    @StateObject private var keyMonitor = PromptCommandActionsKeyMonitor()
+    @State private var keyboardOwner = UUID()
     @FocusState private var searchFocused: Bool
 
     private var actions: [PromptCommandAction] {
@@ -1217,25 +1304,10 @@ private struct CommandActionsView: View {
         .onAppear {
             searchFocused = true
             DispatchQueue.main.async { searchFocused = true }
+            claimKeyboard()
         }
-        .onReceive(keyMonitor.$action.compactMap { $0 }) { action in
-            switch action {
-            case .up:
-                if !filteredActions.isEmpty { selectedIndex = selectedIndex == 0 ? filteredActions.count - 1 : selectedIndex - 1 }
-            case .down:
-                if !filteredActions.isEmpty { selectedIndex = (selectedIndex + 1) % filteredActions.count }
-            case .submit: activateSelected()
-            case .dismiss: onDismiss()
-            }
-            keyMonitor.action = nil
-        }
+        .onDisappear { keyboard.release(owner: keyboardOwner) }
         .onChange(of: query) { _ in selectedIndex = 0 }
-        .onMoveCommand { direction in
-            guard !filteredActions.isEmpty else { return }
-            if direction == .up { selectedIndex = selectedIndex == 0 ? filteredActions.count - 1 : selectedIndex - 1 }
-            if direction == .down { selectedIndex = (selectedIndex + 1) % filteredActions.count }
-        }
-        .onExitCommand { onDismiss() }
     }
 
     private func activateSelected() {
@@ -1244,35 +1316,37 @@ private struct CommandActionsView: View {
     }
 
     private func perform(_ item: PromptCommandAction) {
+        keyboard.release(owner: keyboardOwner)
         onDismiss()
         item.action()
     }
 
-}
-
-@MainActor
-private final class PromptCommandActionsKeyMonitor: ObservableObject {
-    enum Action { case up, down, submit, dismiss }
-    @Published var action: Action?
-    private var monitor: Any?
-
-    init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty else { return event }
-                switch event.keyCode {
-                case 126: self?.action = .up
-                case 125: self?.action = .down
-                case 36, 76: self?.action = .submit
-                case 53: self?.action = .dismiss
-                default: return event
+    private func claimKeyboard() {
+        keyboard.claim(owner: keyboardOwner) { command in
+            switch command {
+            case .moveUp:
+                if !filteredActions.isEmpty {
+                    selectedIndex = selectedIndex == 0 ? filteredActions.count - 1 : selectedIndex - 1
                 }
-                return nil
+            case .moveDown:
+                if !filteredActions.isEmpty {
+                    selectedIndex = (selectedIndex + 1) % filteredActions.count
+                }
+            case .submit: activateSelected()
+            case .back:
+                keyboard.release(owner: keyboardOwner)
+                onDismiss()
+            case .actions:
+                keyboard.release(owner: keyboardOwner)
+                onDismiss()
+            case .delete:
+                return false
+            case .textInput:
+                return false
             }
+            return true
         }
     }
-
-    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 }
 
 /// The text field for building the query for the command palette.
@@ -1280,102 +1354,42 @@ private struct CommandPaletteQuery: View {
     @Binding var query: String
     var title: String?
     var canGoBack: Bool
-    var dismissOnFocusLoss: Bool
-    @Binding var suppressesFocusLoss: Bool
     var onBack: () -> Void
-    var onEvent: ((KeyboardEvent) -> Void)?
     @FocusState private var isTextFieldFocused: Bool
 
-    init(query: Binding<String>, title: String?, canGoBack: Bool, dismissOnFocusLoss: Bool, suppressesFocusLoss: Binding<Bool>, onBack: @escaping () -> Void, onEvent: ((KeyboardEvent) -> Void)? = nil) {
-        _query = query
-        self.title = title
-        self.canGoBack = canGoBack
-        self.dismissOnFocusLoss = dismissOnFocusLoss
-        _suppressesFocusLoss = suppressesFocusLoss
-        self.onBack = onBack
-        self.onEvent = onEvent
-    }
-
-    enum KeyboardEvent {
-        case exit
-        case submit
-        case move(MoveCommandDirection)
-    }
-
     var body: some View {
-        ZStack {
-            Group {
-                Button { onEvent?(.move(.up)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.upArrow, modifiers: [])
-                Button { onEvent?(.move(.down)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.downArrow, modifiers: [])
-
-                Button { onEvent?(.move(.up)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.init("p"), modifiers: [.control])
-                Button { onEvent?(.move(.down)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.init("n"), modifiers: [.control])
-            }
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-
-            HStack(spacing: 12) {
-                if canGoBack {
-                    Button(action: onBack) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 14, weight: .semibold))
-                            .frame(width: 28, height: 28)
-                    }
-                    .promptGlassButtonStyle()
-                    .help("Back")
+        HStack(spacing: 12) {
+            if canGoBack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 28, height: 28)
                 }
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.secondary)
-                TextField(title.map { "Search \($0.lowercased())…" } ?? "Search sessions and commands…", text: $query)
-                    .font(.system(size: 17, weight: .regular))
-                    .textFieldStyle(.plain)
-                    .focused($isTextFieldFocused)
+                .promptGlassButtonStyle()
+                .help("Back")
             }
-            .padding(.horizontal, 18)
-            .frame(height: 62)
-            .textFieldStyle(.plain)
-            .onChange(of: isTextFieldFocused) { focused in
-                if PromptPaletteFocusLossPolicy.shouldDismiss(
-                    focused: focused,
-                    dismissOnFocusLoss: dismissOnFocusLoss,
-                    suppressesFocusLoss: suppressesFocusLoss) {
-                    onEvent?(.exit)
-                }
-            }
-            .onExitCommand { onEvent?(.exit) }
-            .onMoveCommand { onEvent?(.move($0)) }
-            .onSubmit { onEvent?(.submit) }
-            .onAppear {
-                // Grab focus on the first appearance.
-                // Debug and Release build using Xcode 26.4,
-                // has same issue again
-                // Fixes: https://github.com/ghostty-org/ghostty/issues/8497
-                // SearchOverlay works magically as expected, I don't know
-                // why it's different here, but dispatching to next loop fixes it
-                DispatchQueue.main.async {
-                    isTextFieldFocused = true
-                }
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(title.map { "Search \($0.lowercased())…" } ?? "Search sessions and commands…", text: $query)
+                .font(.system(size: 17, weight: .regular))
+                .textFieldStyle(.plain)
+                .focused($isTextFieldFocused)
+        }
+        .padding(.horizontal, 18)
+        .frame(height: 62)
+        .textFieldStyle(.plain)
+        .onAppear {
+            // Grab focus on the first appearance.
+            // Debug and Release build using Xcode 26.4,
+            // has same issue again
+            // Fixes: https://github.com/ghostty-org/ghostty/issues/8497
+            // SearchOverlay works magically as expected, I don't know
+            // why it's different here, but dispatching to next loop fixes it
+            DispatchQueue.main.async {
+                isTextFieldFocused = true
             }
         }
-    }
-}
-
-struct PromptPaletteFocusLossPolicy {
-    static func shouldDismiss(
-        focused: Bool,
-        dismissOnFocusLoss: Bool,
-        suppressesFocusLoss: Bool
-    ) -> Bool {
-        !focused && dismissOnFocusLoss && !suppressesFocusLoss
     }
 }
 
@@ -1549,7 +1563,7 @@ private struct CommandRow: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if option.children != nil {
+                if option.opensRoute {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.tertiary)

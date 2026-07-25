@@ -39,23 +39,87 @@ final class PromptModelTests: XCTestCase {
         XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(NSButton()))
     }
 
-    func testPaletteFocusLossDoesNotDismissDuringInternalNavigation() {
-        XCTAssertFalse(PromptPaletteFocusLossPolicy.shouldDismiss(
-            focused: false,
-            dismissOnFocusLoss: true,
-            suppressesFocusLoss: true))
-        XCTAssertTrue(PromptPaletteFocusLossPolicy.shouldDismiss(
-            focused: false,
-            dismissOnFocusLoss: true,
-            suppressesFocusLoss: false))
-    }
-
     func testPaletteSubmitGateSuppressesRedispatchedReturn() {
         var gate = PromptPaletteSubmitGate()
         XCTAssertTrue(gate.begin())
         XCTAssertFalse(gate.begin())
         gate.reset()
         XCTAssertTrue(gate.begin())
+    }
+
+    func testPaletteNavigationTreatsEverySubmenuAsOneRouteStack() {
+        var navigation = PromptPaletteNavigation()
+        let child = PromptCommandOption(title: "Child") {}
+
+        XCTAssertTrue(navigation.isAtRoot)
+        XCTAssertFalse(navigation.pop())
+
+        navigation.push(.commands(title: "Parent", options: [child]))
+        XCTAssertFalse(navigation.isAtRoot)
+        guard case .commands(let title, let options) = navigation.current else {
+            return XCTFail("Expected a command route")
+        }
+        XCTAssertEqual(title, "Parent")
+        XCTAssertEqual(options.map(\.title), ["Child"])
+
+        XCTAssertTrue(navigation.pop())
+        XCTAssertTrue(navigation.isAtRoot)
+    }
+
+    @MainActor
+    func testPaletteKeyboardRouterHasExactlyOneActiveOwner() {
+        let router = PromptPaletteKeyboardRouter()
+        let root = UUID()
+        let submenu = UUID()
+        var rootCommands: [PromptPaletteKeyboardRouter.Command] = []
+        var submenuCommands: [PromptPaletteKeyboardRouter.Command] = []
+
+        router.claim(owner: root) { rootCommands.append($0); return true }
+        XCTAssertTrue(router.dispatch(.moveDown))
+
+        router.claim(owner: submenu) { submenuCommands.append($0); return true }
+        router.release(owner: root)
+        XCTAssertTrue(router.dispatch(.back))
+
+        router.release(owner: submenu)
+        XCTAssertFalse(router.dispatch(.submit))
+        XCTAssertEqual(rootCommands.count, 1)
+        XCTAssertEqual(submenuCommands.count, 1)
+    }
+
+    @MainActor
+    func testPaletteRouterConsumesNavigationBeforeTerminalDispatch() throws {
+        let router = PromptPaletteKeyboardRouter()
+        let owner = UUID()
+        var commands: [PromptPaletteKeyboardRouter.Command] = []
+        router.claim(owner: owner) { commands.append($0); return true }
+
+        let down = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.numericPad],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "",
+            charactersIgnoringModifiers: "",
+            isARepeat: false,
+            keyCode: 125))
+        let enter = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\r",
+            charactersIgnoringModifiers: "\r",
+            isARepeat: false,
+            keyCode: 36))
+
+        XCTAssertTrue(router.handle(down))
+        XCTAssertTrue(router.handle(enter))
+        XCTAssertEqual(commands.count, 2)
     }
 
     func testPalettePointerOnlyOverridesKeyboardSelectionAfterPhysicalMovement() {

@@ -5,6 +5,7 @@ DerivedData/
 build/
 Artifacts/
 *.xcresult
+xcuserdata/
 *.mov
 *.profraw
 .DS_Store

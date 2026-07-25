@@ -7,6 +7,7 @@ final class PromptWorkspaceStore: ObservableObject {
 
     @Published var workspace: PromptWorkspace
     @Published var isCommandPalettePresented = false
+    weak var commandPaletteKeyRouter: PromptPaletteKeyboardRouter?
     @Published var sidebarLayout: SidebarLayout {
         didSet { settings.set(sidebarLayout.rawValue, forKey: "PromptSidebarLayout") }
     }

@@ -13,6 +13,7 @@ struct PromptCommandPaletteView: View {
                 VStack {
                     Spacer().frame(height: geometry.size.height * 0.05)
                     PromptCommandPaletteContentView(
+                        store: store,
                         isPresented: $isPresented,
                         backgroundColor: PromptTheme.elevated,
                         options: commandOptions)
