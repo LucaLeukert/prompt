@@ -1085,11 +1085,11 @@ struct PromptHostedTerminalView: View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 Group {
-                if showingAuthoritativeSurface, let authority = surface.authoritativeSurface {
-                    GhosttyAppKitSurfaceHost(surface: authority, application: runtime.application)
-                } else {
-                    GhosttyAppKitSurfaceHost(surface: surface, application: runtime.application)
-                }
+                    if showingAuthoritativeSurface, let authority = surface.authoritativeSurface {
+                        GhosttyAppKitSurfaceHost(surface: authority, application: runtime.application)
+                    } else {
+                        GhosttyAppKitSurfaceHost(surface: surface, application: runtime.application)
+                    }
                 }
                 if case .offline(let description) = runtime.remoteConnectionStates[paneID] {
                     HStack(alignment: .top, spacing: 10) {

@@ -482,21 +482,21 @@ struct PromptRichContentLayer: View {
     var body: some View {
         GeometryReader { geometry in
             if allowsRichContent {
-              ForEach(store.blocks(for: surfaceView)) { block in
-                let height = CGFloat(block.reservedRows) * max(1, surfaceView.cellSize.height)
-                PromptInlineRichBlockFrame(
-                    block: block,
-                    surfaceView: surfaceView,
-                    width: max(240, geometry.size.width - 16),
-                    height: height)
-                    .position(
-                        x: geometry.size.width / 2,
-                        // The cursor row includes Ghostty's prompt line. Pull
-                        // the host block into that cleared row, leaving only a
-                        // compact four-point separation from prior TTY output.
-                        y: CGFloat(block.anchorRow - viewportOffset) * max(1, surfaceView.cellSize.height)
-                            + height / 2 - max(0, surfaceView.cellSize.height - 4))
-              }
+                ForEach(store.blocks(for: surfaceView)) { block in
+                    let height = CGFloat(block.reservedRows) * max(1, surfaceView.cellSize.height)
+                    PromptInlineRichBlockFrame(
+                        block: block,
+                        surfaceView: surfaceView,
+                        width: max(240, geometry.size.width - 16),
+                        height: height)
+                        .position(
+                            x: geometry.size.width / 2,
+                            // The cursor row includes Ghostty's prompt line. Pull
+                            // the host block into that cleared row, leaving only a
+                            // compact four-point separation from prior TTY output.
+                            y: CGFloat(block.anchorRow - viewportOffset) * max(1, surfaceView.cellSize.height)
+                                + height / 2 - max(0, surfaceView.cellSize.height - 4))
+                }
             }
         }
         .clipped()
@@ -1502,8 +1502,8 @@ final class PromptModel: ObservableObject {
                 return
             }
             guard
-                  let thread = value["thread"] as? [String: Any],
-                  let id = thread["id"] as? String else {
+                let thread = value["thread"] as? [String: Any],
+                let id = thread["id"] as? String else {
                 failTerminalTurn("Unable to start a lightweight Codex thread.")
                 return
             }
@@ -1686,10 +1686,10 @@ final class PromptModel: ObservableObject {
             let promptIsEmpty = pending.surface.flatMap { PromptNativeInputRouter.promptInput(on: $0) }?.isEmpty == true
             if decision == "accept", let surface = pending.surface,
                PromptInsertionEligibility.allows(
-                richContentAllowed: PromptTerminalEnvironment.allowsRichContent(on: surface),
-                originalCWD: terminalResponseCWD,
-                currentCWD: surface.pwd,
-                promptIsEmpty: promptIsEmpty) {
+                   richContentAllowed: PromptTerminalEnvironment.allowsRichContent(on: surface),
+                   originalCWD: terminalResponseCWD,
+                   currentCWD: surface.pwd,
+                   promptIsEmpty: promptIsEmpty) {
                 insertTerminalText(pending.command, on: surface)
                 PromptController.pressReturn(on: surface)
                 server.respondTool(id: pending.requestID, success: true, text: "Command started in the terminal. Use terminal_read to inspect its output.")
@@ -1765,8 +1765,8 @@ final class PromptModel: ObservableObject {
                 messages.append(message)
                 streamingMessageID = message.id
             }
-            // The constrained final message streams as JSON. Buffer it until
-            // completion so schema fields never appear in the conversation UI.
+        // The constrained final message streams as JSON. Buffer it until
+        // completion so schema fields never appear in the conversation UI.
         case "item/started", "item/completed":
             guard let item = params["item"] as? [String: Any],
                   let itemID = item["id"] as? String,
@@ -2108,7 +2108,7 @@ final class PromptAutocompleteModel: ObservableObject {
         completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputSettingKey) ?? false
         copilot.onStatus = { status in
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "status", status)
+                PromptAIDebug.emit("Copilot Completion", "status", status)
             #endif
         }
     }
@@ -2124,10 +2124,10 @@ final class PromptAutocompleteModel: ObservableObject {
         let classification = PromptTerminalEnvironment.shellClassificationContext(on: surface)
         guard PromptTerminalEnvironment.allowsRichContent(on: surface),
               Self.shouldComplete(
-                prefix: prefix,
-                completesAIInput: completesAIInput,
-                shell: classification.shell,
-                cwd: classification.cwd),
+                  prefix: prefix,
+                  completesAIInput: completesAIInput,
+                  shell: classification.shell,
+                  cwd: classification.cwd),
               trimmed.count >= 2 else {
             clear(on: surface)
             return
@@ -2248,44 +2248,44 @@ final class PromptAutocompleteModel: ObservableObject {
 }
 
 #if DEBUG
-struct PromptAIDebugEvent: Identifiable {
-    let id = UUID()
-    let date = Date()
-    let service: String
-    let level: String
-    let message: String
-}
-
-@MainActor
-final class PromptAIDebugModel: ObservableObject {
-    static let shared = PromptAIDebugModel()
-    @Published private(set) var events: [PromptAIDebugEvent] = []
-    private init() {}
-
-    func append(service: String, level: String, message: String) {
-        events.append(.init(service: service, level: level, message: message))
-        if events.count > 500 { events.removeFirst(events.count - 500) }
+    struct PromptAIDebugEvent: Identifiable {
+        let id = UUID()
+        let date = Date()
+        let service: String
+        let level: String
+        let message: String
     }
 
-    func clear() { events.removeAll() }
-    func latest(for service: String) -> PromptAIDebugEvent? { events.last { $0.service == service } }
+    @MainActor
+    final class PromptAIDebugModel: ObservableObject {
+        static let shared = PromptAIDebugModel()
+        @Published private(set) var events: [PromptAIDebugEvent] = []
+        private init() {}
 
-    var exportText: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss.SSS"
-        return events.map {
-            "\(formatter.string(from: $0.date)) [\($0.service)] [\($0.level)] \($0.message)"
-        }.joined(separator: "\n")
-    }
-}
+        func append(service: String, level: String, message: String) {
+            events.append(.init(service: service, level: level, message: message))
+            if events.count > 500 { events.removeFirst(events.count - 500) }
+        }
 
-enum PromptAIDebug {
-    static func emit(_ service: String, _ level: String, _ message: String) {
-        DispatchQueue.main.async {
-            PromptAIDebugModel.shared.append(service: service, level: level, message: message)
+        func clear() { events.removeAll() }
+        func latest(for service: String) -> PromptAIDebugEvent? { events.last { $0.service == service } }
+
+        var exportText: String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "HH:mm:ss.SSS"
+            return events.map {
+                "\(formatter.string(from: $0.date)) [\($0.service)] [\($0.level)] \($0.message)"
+            }.joined(separator: "\n")
         }
     }
-}
+
+    enum PromptAIDebug {
+        static func emit(_ service: String, _ level: String, _ message: String) {
+            DispatchQueue.main.async {
+                PromptAIDebugModel.shared.append(service: service, level: level, message: message)
+            }
+        }
+    }
 #endif
 
 final class CodexAppServer {
@@ -2313,18 +2313,18 @@ final class CodexAppServer {
     init(service: String) {
         self.service = service
         #if DEBUG
-        PromptAIDebug.emit(service, "state", "service created")
+            PromptAIDebug.emit(service, "state", "service created")
         #endif
     }
 
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
         #if DEBUG
-        PromptAIDebug.emit(service, "state", "locating Codex CLI")
+            PromptAIDebug.emit(service, "state", "locating Codex CLI")
         #endif
         let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
         guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             #if DEBUG
-            PromptAIDebug.emit(service, "error", "Codex CLI not found")
+                PromptAIDebug.emit(service, "error", "Codex CLI not found")
             #endif
             completion(.failure(ServerError.executableMissing)); return
         }
@@ -2344,13 +2344,13 @@ final class CodexAppServer {
             let data = handle.availableData
             guard !data.isEmpty, let value = String(data: data, encoding: .utf8) else { return }
             #if DEBUG
-            PromptAIDebug.emit(self?.service ?? "Unknown", "stderr", value.trimmingCharacters(in: .whitespacesAndNewlines))
+                PromptAIDebug.emit(self?.service ?? "Unknown", "stderr", value.trimmingCharacters(in: .whitespacesAndNewlines))
             #endif
         }
         process.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
                 #if DEBUG
-                if let self { PromptAIDebug.emit(self.service, "error", "app-server exited") }
+                    if let self { PromptAIDebug.emit(self.service, "error", "app-server exited") }
                 #endif
                 self?.process = nil
             }
@@ -2358,11 +2358,11 @@ final class CodexAppServer {
         do {
             try process.run()
             #if DEBUG
-            PromptAIDebug.emit(service, "state", "app-server launched · pid \(process.processIdentifier)")
+                PromptAIDebug.emit(service, "state", "app-server launched · pid \(process.processIdentifier)")
             #endif
         } catch {
             #if DEBUG
-            PromptAIDebug.emit(service, "error", "launch failed: \(error.localizedDescription)")
+                PromptAIDebug.emit(service, "error", "launch failed: \(error.localizedDescription)")
             #endif
             completion(.failure(error)); return
         }
@@ -2373,13 +2373,13 @@ final class CodexAppServer {
             switch result {
             case .success:
                 #if DEBUG
-                PromptAIDebug.emit(self?.service ?? "Unknown", "state", "initialize succeeded")
+                    PromptAIDebug.emit(self?.service ?? "Unknown", "state", "initialize succeeded")
                 #endif
                 self?.notify("initialized", params: [:])
                 completion(.success(()))
             case .failure(let error):
                 #if DEBUG
-                PromptAIDebug.emit(self?.service ?? "Unknown", "error", "initialize failed: \(error.localizedDescription)")
+                    PromptAIDebug.emit(self?.service ?? "Unknown", "error", "initialize failed: \(error.localizedDescription)")
                 #endif
                 completion(.failure(error))
             }
@@ -2390,7 +2390,7 @@ final class CodexAppServer {
         let id = String(nextID); nextID += 1
         callbacks[id] = completion
         #if DEBUG
-        PromptAIDebug.emit(service, "request", "#\(id) → \(method) · \(params.keys.sorted().joined(separator: ", "))")
+            PromptAIDebug.emit(service, "request", "#\(id) → \(method) · \(params.keys.sorted().joined(separator: ", "))")
         #endif
         write(["id": Int(id)!, "method": method, "params": params])
     }
@@ -2435,34 +2435,34 @@ final class CodexAppServer {
         if let id = Self.stringID(value["id"]), let callback = callbacks.removeValue(forKey: id), value["method"] == nil {
             if let error = value["error"] as? [String: Any] {
                 #if DEBUG
-                PromptAIDebug.emit(service, "error", "#\(id) ← \(error["message"] as? String ?? "request failed")")
+                    PromptAIDebug.emit(service, "error", "#\(id) ← \(error["message"] as? String ?? "request failed")")
                 #endif
                 callback(.failure(ServerError.response(error["message"] as? String ?? "Codex request failed")))
             } else {
                 #if DEBUG
-                let result = value["result"] as? [String: Any] ?? [:]
-                PromptAIDebug.emit(service, "response", "#\(id) ← success · \(result.keys.sorted().joined(separator: ", "))")
+                    let result = value["result"] as? [String: Any] ?? [:]
+                    PromptAIDebug.emit(service, "response", "#\(id) ← success · \(result.keys.sorted().joined(separator: ", "))")
                 #endif
                 callback(.success(value["result"] as? [String: Any] ?? [:]))
             }
         } else if value["id"] != nil, value["method"] != nil {
             #if DEBUG
-            PromptAIDebug.emit(service, "server request", value["method"] as? String ?? "unknown")
+                PromptAIDebug.emit(service, "server request", value["method"] as? String ?? "unknown")
             #endif
             onServerRequest?(value)
         } else {
             #if DEBUG
-            if let method = value["method"] as? String, !method.contains("delta") {
-                if method == "error",
-                   let params = value["params"],
-                   JSONSerialization.isValidJSONObject(params),
-                   let data = try? JSONSerialization.data(withJSONObject: params),
-                   let detail = String(data: data, encoding: .utf8) {
-                    PromptAIDebug.emit(service, "error", "error · \(detail)")
-                } else {
-                    PromptAIDebug.emit(service, "notification", method)
+                if let method = value["method"] as? String, !method.contains("delta") {
+                    if method == "error",
+                       let params = value["params"],
+                       JSONSerialization.isValidJSONObject(params),
+                       let data = try? JSONSerialization.data(withJSONObject: params),
+                       let detail = String(data: data, encoding: .utf8) {
+                        PromptAIDebug.emit(service, "error", "error · \(detail)")
+                    } else {
+                        PromptAIDebug.emit(service, "notification", method)
+                    }
                 }
-            }
             #endif
             onNotification?(value)
         }
@@ -2504,7 +2504,7 @@ final class PromptCopilotCompletionServer {
         starting = true
         onStatus?("Starting GitHub Copilot Language Server")
         #if DEBUG
-        PromptAIDebug.emit("Copilot Completion", "state", "locating language server")
+            PromptAIDebug.emit("Copilot Completion", "state", "locating language server")
         #endif
 
         let executable: String
@@ -2523,7 +2523,7 @@ final class PromptCopilotCompletionServer {
             starting = false
             onStatus?("Install Node.js or copilot-language-server to enable completions")
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "error", "npx and copilot-language-server were not found")
+                PromptAIDebug.emit("Copilot Completion", "error", "npx and copilot-language-server were not found")
             #endif
             return
         }
@@ -2555,7 +2555,7 @@ final class PromptCopilotCompletionServer {
             DispatchQueue.main.async {
                 self?.onStatus?(value.trimmingCharacters(in: .whitespacesAndNewlines))
                 #if DEBUG
-                PromptAIDebug.emit("Copilot Completion", "stderr", value.trimmingCharacters(in: .whitespacesAndNewlines))
+                    PromptAIDebug.emit("Copilot Completion", "stderr", value.trimmingCharacters(in: .whitespacesAndNewlines))
                 #endif
             }
         }
@@ -2572,7 +2572,7 @@ final class PromptCopilotCompletionServer {
                 }
                 self?.onStatus?("Copilot Language Server exited (\(process.terminationStatus))")
                 #if DEBUG
-                PromptAIDebug.emit("Copilot Completion", "error", "language server exited · \(process.terminationStatus)")
+                    PromptAIDebug.emit("Copilot Completion", "error", "language server exited · \(process.terminationStatus)")
                 #endif
             }
         }
@@ -2580,14 +2580,14 @@ final class PromptCopilotCompletionServer {
             try process.run()
             self.process = process
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "state", "language server launched · pid \(process.processIdentifier)")
+                PromptAIDebug.emit("Copilot Completion", "state", "language server launched · pid \(process.processIdentifier)")
             #endif
             initialize()
         } catch {
             starting = false
             onStatus?("Unable to launch Copilot: \(error.localizedDescription)")
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "error", "launch failed: \(error.localizedDescription)")
+                PromptAIDebug.emit("Copilot Completion", "error", "launch failed: \(error.localizedDescription)")
             #endif
         }
     }
@@ -2634,7 +2634,7 @@ final class PromptCopilotCompletionServer {
             notify("workspace/didChangeConfiguration", params: ["settings": [:]])
             onStatus?("Copilot ready")
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "state", "initialize succeeded")
+                PromptAIDebug.emit("Copilot Completion", "state", "initialize succeeded")
             #endif
             if let pending = pendingCompletion {
                 requestCompletion(prefix: pending.prefix, cwd: pending.cwd, terminal: pending.terminal, completion: pending.completion)
@@ -2699,11 +2699,11 @@ final class PromptCopilotCompletionServer {
                 notify("textDocument/didShowCompletion", params: ["item": item])
             }
             #if DEBUG
-            let shape = result is [[String: Any]]
-                ? "array"
-                : "object[\(((result as? [String: Any])?.keys.sorted().joined(separator: ",")) ?? "")]"
-            PromptAIDebug.emit("Copilot Completion", "completion", "\(values.count) suggestion(s) · \(shape) · \(items.first?.keys.sorted().joined(separator: ",") ?? "no item") · input: \(String(requestPrefix.prefix(300)))")
-            PromptAIDebug.emit("Copilot Completion", "context", "\(context.pathCandidates.count) path(s), \(context.executableCandidates.count) executable(s) · \(String(document.prefix(4_000)))")
+                let shape = result is [[String: Any]]
+                    ? "array"
+                    : "object[\(((result as? [String: Any])?.keys.sorted().joined(separator: ",")) ?? "")]"
+                PromptAIDebug.emit("Copilot Completion", "completion", "\(values.count) suggestion(s) · \(shape) · \(items.first?.keys.sorted().joined(separator: ",") ?? "no item") · input: \(String(requestPrefix.prefix(300)))")
+                PromptAIDebug.emit("Copilot Completion", "context", "\(context.pathCandidates.count) path(s), \(context.executableCandidates.count) executable(s) · \(String(document.prefix(4_000)))")
             #endif
             guard !values.isEmpty else {
                 self.requestPanelCompletion(
@@ -2762,10 +2762,10 @@ final class PromptCopilotCompletionServer {
             return suffix
         }
         #if DEBUG
-        PromptAIDebug.emit(
-            "Copilot Completion",
-            "panel completion",
-            "\(values.count) suggestion(s) · \(items.count) returned item(s) · input: \(String(prefix.prefix(300)))")
+            PromptAIDebug.emit(
+                "Copilot Completion",
+                "panel completion",
+                "\(values.count) suggestion(s) · \(items.count) returned item(s) · input: \(String(prefix.prefix(300)))")
         #endif
         completion(Array(values.prefix(3)))
     }
@@ -2783,7 +2783,7 @@ final class PromptCopilotCompletionServer {
         nextID += 1
         callbacks[id] = completion
         #if DEBUG
-        PromptAIDebug.emit("Copilot Completion", "request", "#\(id) → \(method)")
+            PromptAIDebug.emit("Copilot Completion", "request", "#\(id) → \(method)")
         #endif
         write(["jsonrpc": "2.0", "id": id, "method": method, "params": params])
     }
@@ -2808,7 +2808,7 @@ final class PromptCopilotCompletionServer {
                 let header = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
                 guard let lengthLine = header.components(separatedBy: "\r\n")
                     .first(where: { $0.lowercased().hasPrefix("content-length:") }),
-                      let length = Int(lengthLine.split(separator: ":", maxSplits: 1)[1]
+                    let length = Int(lengthLine.split(separator: ":", maxSplits: 1)[1]
                         .trimmingCharacters(in: .whitespaces)) else {
                     buffer.removeSubrange(..<headerEnd.upperBound)
                     continue
@@ -2827,13 +2827,13 @@ final class PromptCopilotCompletionServer {
            value["method"] == nil,
            let callback = callbacks.removeValue(forKey: id) {
             #if DEBUG
-            if let error = value["error"] as? [String: Any] {
-                let message = error["message"] as? String ?? "request failed"
-                PromptAIDebug.emit(
-                    "Copilot Completion",
-                    message.contains("superseded") ? "cancelled" : "error",
-                    "#\(id) ← \(message)")
-            } else { PromptAIDebug.emit("Copilot Completion", "response", "#\(id) ← success") }
+                if let error = value["error"] as? [String: Any] {
+                    let message = error["message"] as? String ?? "request failed"
+                    PromptAIDebug.emit(
+                        "Copilot Completion",
+                        message.contains("superseded") ? "cancelled" : "error",
+                        "#\(id) ← \(message)")
+                } else { PromptAIDebug.emit("Copilot Completion", "response", "#\(id) ← success") }
             #endif
             callback(value["result"])
             return
@@ -2855,12 +2855,12 @@ final class PromptCopilotCompletionServer {
             let message = params["message"] as? String ?? ""
             onStatus?("\(kind): \(message)")
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", kind == "Error" ? "error" : "status", "\(kind): \(message)")
+                PromptAIDebug.emit("Copilot Completion", kind == "Error" ? "error" : "status", "\(kind): \(message)")
             #endif
             if kind == "Error", !signInStarted { signIn() }
         } else if method == "window/logMessage" {
             #if DEBUG
-            PromptAIDebug.emit("Copilot Completion", "log", params["message"] as? String ?? "")
+                PromptAIDebug.emit("Copilot Completion", "log", params["message"] as? String ?? "")
             #endif
         }
     }
@@ -3168,7 +3168,7 @@ struct PromptInputClassifier {
     static func strippedInput(_ raw: String) -> String {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         for prefix in ["/ai ", "/ask ", "/agent ", "/suggest ", "/shell ", "? ", "$ "]
-        where text.lowercased().hasPrefix(prefix) {
+            where text.lowercased().hasPrefix(prefix) {
             return String(text.dropFirst(prefix.count))
         }
         return text
@@ -3183,22 +3183,22 @@ private enum PromptShellInputProbe {
     private static let cacheLock = NSLock()
     private static var cache: [String: PromptInputMode] = [:]
     private static let zshProbe = #"""
-        setopt extendedglob
-        typeset -gi prompt_auto_debug_count=0
-        TRAPDEBUG() {
-          (( ++prompt_auto_debug_count == 1 )) && return 0
-          local -a prompt_auto_words
-          prompt_auto_words=("${(z)ZSH_DEBUG_CMD}")
-          local prompt_auto_word
-          for prompt_auto_word in "${prompt_auto_words[@]}"; do
-            [[ $prompt_auto_word == [[:IDENT:]]##=* ]] && continue
-            whence -w -- "$prompt_auto_word" >/dev/null 2>&1 && exit 40
-            exit 41
-          done
-          exit 41
-        }
-        eval -- "$1"
-        """#
+    setopt extendedglob
+    typeset -gi prompt_auto_debug_count=0
+    TRAPDEBUG() {
+      (( ++prompt_auto_debug_count == 1 )) && return 0
+      local -a prompt_auto_words
+      prompt_auto_words=("${(z)ZSH_DEBUG_CMD}")
+      local prompt_auto_word
+      for prompt_auto_word in "${prompt_auto_words[@]}"; do
+        [[ $prompt_auto_word == [[:IDENT:]]##=* ]] && continue
+        whence -w -- "$prompt_auto_word" >/dev/null 2>&1 && exit 40
+        exit 41
+      done
+      exit 41
+    }
+    eval -- "$1"
+    """#
 
     static func classify(_ text: String, shell: String?, cwd: String?) -> PromptInputMode {
         guard let shell, URL(fileURLWithPath: shell).lastPathComponent == "zsh",
@@ -3579,152 +3579,152 @@ private struct PromptPointingHandCursor: ViewModifier {
 }
 
 #if DEBUG
-private struct PromptAIDebugView: View {
-    @ObservedObject private var debug = PromptAIDebugModel.shared
-    @Environment(\.dismiss) private var dismiss
-    @State private var service = "All"
-    private let services = ["All", "Main AI", "Copilot Completion"]
+    private struct PromptAIDebugView: View {
+        @ObservedObject private var debug = PromptAIDebugModel.shared
+        @Environment(\.dismiss) private var dismiss
+        @State private var service = "All"
+        private let services = ["All", "Main AI", "Copilot Completion"]
 
-    private var visibleEvents: [PromptAIDebugEvent] {
-        service == "All" ? debug.events : debug.events.filter { $0.service == service }
-    }
+        private var visibleEvents: [PromptAIDebugEvent] {
+            service == "All" ? debug.events : debug.events.filter { $0.service == service }
+        }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("AI SERVICE INSPECTOR")
-                        .font(.custom(PromptTypography.mono, size: 15).weight(.bold))
-                    Text("live app-server telemetry · DEBUG build")
-                        .font(.custom(PromptTypography.mono, size: 10))
-                        .foregroundStyle(.secondary)
+        var body: some View {
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("AI SERVICE INSPECTOR")
+                            .font(.custom(PromptTypography.mono, size: 15).weight(.bold))
+                        Text("live app-server telemetry · DEBUG build")
+                            .font(.custom(PromptTypography.mono, size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Copy log", action: copyLog)
+                    Button("Clear") { debug.clear() }
+                    Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
                 }
-                Spacer()
-                Button("Copy log", action: copyLog)
-                Button("Clear") { debug.clear() }
-                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-            .padding(16)
+                .padding(16)
 
-            HStack(spacing: 10) {
-                serviceCard("Main AI", icon: "sparkles")
-                serviceCard("Copilot Completion", icon: "text.cursor")
-            }
-            .padding(.horizontal, 16).padding(.bottom, 12)
-
-            HStack(spacing: 5) {
-                ForEach(services, id: \.self) { value in
-                    Button { service = value } label: {
-                        Text(value)
-                            .font(.custom(PromptTypography.mono, size: 10).weight(.semibold))
-                            .padding(.horizontal, 10).padding(.vertical, 5)
-                            .background(service == value ? Color.primary.opacity(0.13) : .clear, in: Capsule())
-                    }.buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    serviceCard("Main AI", icon: "sparkles")
+                    serviceCard("Copilot Completion", icon: "text.cursor")
                 }
-                Spacer()
-                Text("\(visibleEvents.count) EVENTS")
-                    .font(.custom(PromptTypography.mono, size: 9).weight(.bold))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 16).padding(.vertical, 9)
-            .background(Color.primary.opacity(0.035))
+                .padding(.horizontal, 16).padding(.bottom, 12)
 
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(visibleEvents) { event in
-                            eventRow(event).id(event.id)
+                HStack(spacing: 5) {
+                    ForEach(services, id: \.self) { value in
+                        Button { service = value } label: {
+                            Text(value)
+                                .font(.custom(PromptTypography.mono, size: 10).weight(.semibold))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(service == value ? Color.primary.opacity(0.13) : .clear, in: Capsule())
+                        }.buttonStyle(.plain)
+                    }
+                    Spacer()
+                    Text("\(visibleEvents.count) EVENTS")
+                        .font(.custom(PromptTypography.mono, size: 9).weight(.bold))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16).padding(.vertical, 9)
+                .background(Color.primary.opacity(0.035))
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(visibleEvents) { event in
+                                eventRow(event).id(event.id)
+                            }
                         }
                     }
+                    .onChange(of: visibleEvents.count) { _ in
+                        if let id = visibleEvents.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                    }
                 }
-                .onChange(of: visibleEvents.count) { _ in
-                    if let id = visibleEvents.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                .background(Color.black.opacity(0.18))
+            }
+            .frame(minWidth: 760, idealWidth: 860, minHeight: 500, idealHeight: 620)
+            .background(Color(nsColor: .windowBackgroundColor))
+        }
+
+        private func serviceCard(_ name: String, icon: String) -> some View {
+            let latest = debug.latest(for: name)
+            let failed = latest?.level == "error" || latest?.level == "stderr"
+            return HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(failed ? Color.red : Color.mint)
+                    .frame(width: 30, height: 30)
+                    .background((failed ? Color.red : Color.mint).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(name).font(.custom(PromptTypography.sans, size: 12).weight(.bold))
+                        Spacer()
+                        Circle().fill(failed ? Color.red : Color.mint).frame(width: 6, height: 6)
+                    }
+                    Text(latest?.message ?? "No telemetry yet")
+                        .font(.custom(PromptTypography.mono, size: 9))
+                        .foregroundStyle(.secondary).lineLimit(2)
                 }
             }
-            .background(Color.black.opacity(0.18))
+            .padding(11).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
         }
-        .frame(minWidth: 760, idealWidth: 860, minHeight: 500, idealHeight: 620)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
 
-    private func serviceCard(_ name: String, icon: String) -> some View {
-        let latest = debug.latest(for: name)
-        let failed = latest?.level == "error" || latest?.level == "stderr"
-        return HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(failed ? Color.red : Color.mint)
-                .frame(width: 30, height: 30)
-                .background((failed ? Color.red : Color.mint).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-            VStack(alignment: .leading, spacing: 3) {
-                HStack {
-                    Text(name).font(.custom(PromptTypography.sans, size: 12).weight(.bold))
-                    Spacer()
-                    Circle().fill(failed ? Color.red : Color.mint).frame(width: 6, height: 6)
-                }
-                Text(latest?.message ?? "No telemetry yet")
-                    .font(.custom(PromptTypography.mono, size: 9))
-                    .foregroundStyle(.secondary).lineLimit(2)
+        private func eventRow(_ event: PromptAIDebugEvent) -> some View {
+            HStack(alignment: .top, spacing: 10) {
+                Text(Self.timeFormatter.string(from: event.date))
+                    .foregroundStyle(.tertiary).frame(width: 82, alignment: .leading)
+                Text(event.service == "Copilot Completion" ? "COPILOT" : "MAIN")
+                    .foregroundStyle(event.service == "Copilot Completion" ? Color.cyan : Color.mint)
+                    .frame(width: 58, alignment: .leading)
+                Text(event.level.uppercased())
+                    .foregroundStyle(event.level == "error" || event.level == "stderr" ? Color.red : Color.secondary)
+                    .frame(width: 82, alignment: .leading)
+                Text(event.message).foregroundStyle(Color.primary).textSelection(.enabled)
+                Spacer(minLength: 0)
             }
+            .font(.custom(PromptTypography.mono, size: 10))
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .background(event.level == "error" || event.level == "stderr" ? Color.red.opacity(0.055) : .clear)
+            .overlay(alignment: .bottom) { Divider().opacity(0.25) }
         }
-        .padding(11).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-    }
 
-    private func eventRow(_ event: PromptAIDebugEvent) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(Self.timeFormatter.string(from: event.date))
-                .foregroundStyle(.tertiary).frame(width: 82, alignment: .leading)
-            Text(event.service == "Copilot Completion" ? "COPILOT" : "MAIN")
-                .foregroundStyle(event.service == "Copilot Completion" ? Color.cyan : Color.mint)
-                .frame(width: 58, alignment: .leading)
-            Text(event.level.uppercased())
-                .foregroundStyle(event.level == "error" || event.level == "stderr" ? Color.red : Color.secondary)
-                .frame(width: 82, alignment: .leading)
-            Text(event.message).foregroundStyle(Color.primary).textSelection(.enabled)
-            Spacer(minLength: 0)
+        private func copyLog() {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(debug.exportText, forType: .string)
         }
-        .font(.custom(PromptTypography.mono, size: 10))
-        .padding(.horizontal, 14).padding(.vertical, 6)
-        .background(event.level == "error" || event.level == "stderr" ? Color.red.opacity(0.055) : .clear)
-        .overlay(alignment: .bottom) { Divider().opacity(0.25) }
+
+        private static let timeFormatter: DateFormatter = {
+            let value = DateFormatter()
+            value.dateFormat = "HH:mm:ss.SSS"
+            return value
+        }()
     }
 
-    private func copyLog() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(debug.exportText, forType: .string)
+    @MainActor
+    final class PromptAIDebugWindowController: NSWindowController {
+        static let shared = PromptAIDebugWindowController()
+
+        private init() {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: PromptAIDebugView()))
+            window.title = "AI Service Inspector"
+            window.setContentSize(NSSize(width: 860, height: 620))
+            window.minSize = NSSize(width: 760, height: 500)
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            super.init(window: window)
+        }
+
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        func show() {
+            showWindow(nil)
+            window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
-
-    private static let timeFormatter: DateFormatter = {
-        let value = DateFormatter()
-        value.dateFormat = "HH:mm:ss.SSS"
-        return value
-    }()
-}
-
-@MainActor
-final class PromptAIDebugWindowController: NSWindowController {
-    static let shared = PromptAIDebugWindowController()
-
-    private init() {
-        let window = NSWindow(contentViewController: NSHostingController(rootView: PromptAIDebugView()))
-        window.title = "AI Service Inspector"
-        window.setContentSize(NSSize(width: 860, height: 620))
-        window.minSize = NSSize(width: 760, height: 500)
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.isReleasedWhenClosed = false
-        window.center()
-        super.init(window: window)
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func show() {
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-}
 #endif
 
 /// A click-through status ornament for the real terminal prompt. It follows
@@ -3819,15 +3819,15 @@ struct PromptNativeModeBadge: View {
                             dismissHoverSelector()
                             surfaceView.focus()
                         })
-                    .contentShape(RoundedRectangle(cornerRadius: 16))
-                    .onHover { hovering in
-                        if hovering { cancelHoverDismiss() } else { dismissHoverSelector() }
-                    }
-                    .modifier(PromptSelectorPanelGlass(namespace: selectorGlass))
-                    .fixedSize()
-                    .position(
-                        x: max(188, geometry.size.width - 188),
-                        y: min(max(112, cursorRect.midY + 112), max(112, geometry.size.height - 112)))
+                        .contentShape(RoundedRectangle(cornerRadius: 16))
+                        .onHover { hovering in
+                            if hovering { cancelHoverDismiss() } else { dismissHoverSelector() }
+                        }
+                        .modifier(PromptSelectorPanelGlass(namespace: selectorGlass))
+                        .fixedSize()
+                        .position(
+                            x: max(188, geometry.size.width - 188),
+                            y: min(max(112, cursorRect.midY + 112), max(112, geometry.size.height - 112)))
                 }
             }
         }
@@ -4120,10 +4120,10 @@ struct PromptTerminalCommandBar: View {
                     let available = max(180, geometry.size.width - cursorRect.minX - 8)
                     if isComposerVisible {
                         inlineComposer
-                        .frame(width: min(560, available), height: max(22, cursorRect.height))
-                        .position(
-                            x: cursorRect.minX + min(560, available) / 2,
-                            y: min(cursorRect.midY, geometry.size.height - cursorRect.height / 2))
+                            .frame(width: min(560, available), height: max(22, cursorRect.height))
+                            .position(
+                                x: cursorRect.minX + min(560, available) / 2,
+                                y: min(cursorRect.midY, geometry.size.height - cursorRect.height / 2))
                     }
                 }
             }

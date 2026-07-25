@@ -46,8 +46,8 @@ private final class PromptWindow: NSWindow {
             guard focusPaletteInputIfAvailable() else { return }
         } else if !PromptKeyboardFocusRouting.preservesEditableControl(firstResponder),
                   let session = workspaceStore.workspace.sessions.first(where: {
-            $0.id == workspaceStore.workspace.focusedSessionID
-        }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
+                      $0.id == workspaceStore.workspace.focusedSessionID
+                  }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
             // Application shortcuts are consumed by the local shortcut router
             // before they arrive here. Reclaim terminal focus after sidebar
             // interactions, but preserve SwiftUI's field editor while a
@@ -524,27 +524,27 @@ private struct PromptSidebarSessionRow: View {
             CodexMark()
                 .frame(width: 18, height: 18)
             VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 4)
-                if agentActivity?.isWorking == true || runtime.localCodexThreads[session.focusedPaneID]?.isWorking == true { ProgressView().controlSize(.mini) }
-                if let startedAt, agentActivity?.isWorking == true {
-                    TimelineView(.periodic(from: .now, by: 60)) { _ in
-                        Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if agentActivity?.isWorking == true || runtime.localCodexThreads[session.focusedPaneID]?.isWorking == true { ProgressView().controlSize(.mini) }
+                    if let startedAt, agentActivity?.isWorking == true {
+                        TimelineView(.periodic(from: .now, by: 60)) { _ in
+                            Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                        }
                     }
                 }
-            }
-            .padding(.trailing, headerAccessoryInset)
-            HStack(spacing: 6) {
-                if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
-                    Text(branch)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .lineLimit(1)
-                } else {
-                    Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                .padding(.trailing, headerAccessoryInset)
+                HStack(spacing: 6) {
+                    if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+                        Text(branch)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .lineLimit(1)
+                    } else {
+                        Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                    }
                 }
-            }
-            .foregroundStyle(.tertiary)
+                .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 10)

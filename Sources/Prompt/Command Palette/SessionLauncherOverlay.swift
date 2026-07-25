@@ -38,8 +38,8 @@ struct PromptCommandPaletteView: View {
                 contextualActions: {
                     PromptSessionLauncher.currentDirectoryActions(store: store, directory: directory)
                 }) {
-                store.createLocal(directory: directory)
-            },
+                    store.createLocal(directory: directory)
+                },
             PromptCommandOption(title: "Open folder…", section: "Create session", subtitle: "Choose a folder on this Mac", description: "Browse folders without leaving the palette", folderPicker: PromptSessionLauncher.localFolderPicker(store: store, at: directory), primaryActionTitle: "Browse local folders"),
             PromptCommandOption(
                 title: "Git open…",

@@ -237,8 +237,8 @@ struct PromptCommandPaletteContentView: View {
             // Filter by title/subtitle match OR color match
             let filtered = visibleOptions.filter {
                 $0.title.promptMatchedIndices(for: query) != nil ||
-                ($0.subtitle?.promptMatchedIndices(for: query) != nil) ||
-                colorMatchScore(for: $0.leadingColor, query: query) > 0
+                    ($0.subtitle?.promptMatchedIndices(for: query) != nil) ||
+                    colorMatchScore(for: $0.leadingColor, query: query) > 0
             }
 
             // Sort by color match score (higher scores first), then maintain original order
@@ -275,115 +275,115 @@ struct PromptCommandPaletteContentView: View {
                     isPresented: $isPresented,
                     onBack: { self.folderPicker = nil })
             } else {
-        ZStack(alignment: .bottomTrailing) {
-        VStack(alignment: .leading, spacing: 0) {
-            CommandPaletteQuery(
-                query: $rawQuery,
-                title: pages.last?.title,
-                canGoBack: !pages.isEmpty,
-                dismissOnFocusLoss: !actionsArePresented,
-                suppressesFocusLoss: $suppressesTransitionFocusLoss,
-                onBack: goBack
-            ) { event in
-                switch event {
-                case .exit:
-                    guard !suppressesTransitionFocusLoss else { break }
-                    if pages.isEmpty { isPresented = false } else { goBack() }
+                ZStack(alignment: .bottomTrailing) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        CommandPaletteQuery(
+                            query: $rawQuery,
+                            title: pages.last?.title,
+                            canGoBack: !pages.isEmpty,
+                            dismissOnFocusLoss: !actionsArePresented,
+                            suppressesFocusLoss: $suppressesTransitionFocusLoss,
+                            onBack: goBack
+                        ) { event in
+                            switch event {
+                            case .exit:
+                                guard !suppressesTransitionFocusLoss else { break }
+                                if pages.isEmpty { isPresented = false } else { goBack() }
 
-                case .submit:
-                    submitFromKeyboard()
+                            case .submit:
+                                submitFromKeyboard()
 
-                case .move(.up):
-                    if filteredOptions.isEmpty { break }
-                    pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-                    let current = selectedIndex ?? UInt(filteredOptions.count)
-                    selectedIndex = (current == 0)
-                        ? UInt(filteredOptions.count - 1)
-                        : current - 1
+                            case .move(.up):
+                                if filteredOptions.isEmpty { break }
+                                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+                                let current = selectedIndex ?? UInt(filteredOptions.count)
+                                selectedIndex = (current == 0)
+                                    ? UInt(filteredOptions.count - 1)
+                                    : current - 1
 
-                case .move(.down):
-                    if filteredOptions.isEmpty { break }
-                    pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-                    let current = selectedIndex ?? UInt.max
-                    selectedIndex = (current >= UInt(filteredOptions.count - 1))
-                        ? 0
-                        : current + 1
+                            case .move(.down):
+                                if filteredOptions.isEmpty { break }
+                                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+                                let current = selectedIndex ?? UInt.max
+                                selectedIndex = (current >= UInt(filteredOptions.count - 1))
+                                    ? 0
+                                    : current + 1
 
-                case .move(.left):
-                    if !pages.isEmpty { goBack() }
+                            case .move(.left):
+                                if !pages.isEmpty { goBack() }
 
-                case .move:
-                    break
-                }
-            }
-            .onChange(of: query) { _ in
-                // Always keep an actionable row selected so Return works immediately.
-                selectedIndex = filteredOptions.isEmpty ? nil : 0
-            }
+                            case .move:
+                                break
+                            }
+                        }
+                        .onChange(of: query) { _ in
+                            // Always keep an actionable row selected so Return works immediately.
+                            selectedIndex = filteredOptions.isEmpty ? nil : 0
+                        }
 
-            Divider().opacity(0.55)
+                        Divider().opacity(0.55)
 
-            CommandTable(
-                options: filteredOptions,
-                query: query,
-                selectedIndex: $selectedIndex,
-                onPointerSelection: { index in
-                    let location = NSEvent.mouseLocation
-                    guard pointerTrackingStarted else { return }
-                    guard PromptPalettePointerPolicy.hasMoved(
-                        from: pointerLocationAtKeyboardNavigation,
-                        to: location
-                    ) else { return }
-                    pointerLocationAtKeyboardNavigation = nil
-                    selectedIndex = UInt(index)
-                }) { option in
-                    activate(option)
-            }
+                        CommandTable(
+                            options: filteredOptions,
+                            query: query,
+                            selectedIndex: $selectedIndex,
+                            onPointerSelection: { index in
+                                let location = NSEvent.mouseLocation
+                                guard pointerTrackingStarted else { return }
+                                guard PromptPalettePointerPolicy.hasMoved(
+                                    from: pointerLocationAtKeyboardNavigation,
+                                    to: location
+                                ) else { return }
+                                pointerLocationAtKeyboardNavigation = nil
+                                selectedIndex = UInt(index)
+                            }) { option in
+                                activate(option)
+                            }
 
-            Divider().opacity(0.55)
+                        Divider().opacity(0.55)
 
-            HStack(spacing: 16) {
-                PaletteHint(keys: ["↑", "↓"], label: "Navigate")
-                PaletteHint(keys: ["↩"], label: "Select")
-                Spacer()
-                if let selectedOption {
-                    Button {
-                        activate(selectedOption)
-                    } label: {
-                        PaletteHint(
-                            keys: ["↩"],
-                            label: selectedOption.children == nil && selectedOption.folderPicker == nil && selectedOption.sidebarEditor == nil ? "Run" : "Open")
+                        HStack(spacing: 16) {
+                            PaletteHint(keys: ["↑", "↓"], label: "Navigate")
+                            PaletteHint(keys: ["↩"], label: "Select")
+                            Spacer()
+                            if let selectedOption {
+                                Button {
+                                    activate(selectedOption)
+                                } label: {
+                                    PaletteHint(
+                                        keys: ["↩"],
+                                        label: selectedOption.children == nil && selectedOption.folderPicker == nil && selectedOption.sidebarEditor == nil ? "Run" : "Open")
+                                }
+                                .promptGlassButtonStyle()
+
+                                Button { toggleActions() } label: {
+                                    PaletteHint(keys: ["⌘", "K"], label: "Actions")
+                                }
+                                .promptGlassButtonStyle()
+                            }
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 18)
+                        .frame(height: 48)
                     }
-                    .promptGlassButtonStyle()
-
-                    Button { toggleActions() } label: {
-                        PaletteHint(keys: ["⌘", "K"], label: "Actions")
+                    if actionsArePresented, let selectedOption {
+                        CommandActionsView(
+                            option: selectedOption,
+                            onPrimary: { activate(selectedOption) },
+                            onDismiss: { actionsArePresented = false })
+                            .frame(width: 330)
+                            .padding(.trailing, 12)
+                            .padding(.bottom, 54)
+                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
+                            .zIndex(4)
                     }
-                    .promptGlassButtonStyle()
-                }
-            }
-            .font(.system(size: 11, weight: .medium))
-            .padding(.horizontal, 18)
-            .frame(height: 48)
-        }
-            if actionsArePresented, let selectedOption {
-                CommandActionsView(
-                    option: selectedOption,
-                    onPrimary: { activate(selectedOption) },
-                    onDismiss: { actionsArePresented = false })
-                    .frame(width: 330)
-                    .padding(.trailing, 12)
-                    .padding(.bottom, 54)
-                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
-                    .zIndex(4)
-            }
 
-            Button { toggleActions() } label: { Color.clear }
-                .buttonStyle(.plain)
-                .keyboardShortcut("k", modifiers: [.command])
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
-        }
+                    Button { toggleActions() } label: { Color.clear }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("k", modifiers: [.command])
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                }
             }
         }
         .frame(maxWidth: 720)
@@ -860,9 +860,9 @@ private struct FolderPickerView: View {
                                 subtitle: entry.subtitle,
                                 icon: entry.icon,
                                 selected: selectedIndex == rowIndex) {
-                                activate(entry)
-                            }
-                            .id(entry.id)
+                                    activate(entry)
+                                }
+                                .id(entry.id)
                         }
 
                         if isLoading {
@@ -1340,31 +1340,31 @@ private struct CommandPaletteQuery: View {
                     .textFieldStyle(.plain)
                     .focused($isTextFieldFocused)
             }
-                .padding(.horizontal, 18)
-                .frame(height: 62)
-                .textFieldStyle(.plain)
-                .onChange(of: isTextFieldFocused) { focused in
-                    if PromptPaletteFocusLossPolicy.shouldDismiss(
-                        focused: focused,
-                        dismissOnFocusLoss: dismissOnFocusLoss,
-                        suppressesFocusLoss: suppressesFocusLoss) {
-                        onEvent?(.exit)
-                    }
+            .padding(.horizontal, 18)
+            .frame(height: 62)
+            .textFieldStyle(.plain)
+            .onChange(of: isTextFieldFocused) { focused in
+                if PromptPaletteFocusLossPolicy.shouldDismiss(
+                    focused: focused,
+                    dismissOnFocusLoss: dismissOnFocusLoss,
+                    suppressesFocusLoss: suppressesFocusLoss) {
+                    onEvent?(.exit)
                 }
-                .onExitCommand { onEvent?(.exit) }
-                .onMoveCommand { onEvent?(.move($0)) }
-                .onSubmit { onEvent?(.submit) }
-                .onAppear {
-                    // Grab focus on the first appearance.
-                    // Debug and Release build using Xcode 26.4,
-                    // has same issue again
-                    // Fixes: https://github.com/ghostty-org/ghostty/issues/8497
-                    // SearchOverlay works magically as expected, I don't know
-                    // why it's different here, but dispatching to next loop fixes it
-                    DispatchQueue.main.async {
-                        isTextFieldFocused = true
-                    }
+            }
+            .onExitCommand { onEvent?(.exit) }
+            .onMoveCommand { onEvent?(.move($0)) }
+            .onSubmit { onEvent?(.submit) }
+            .onAppear {
+                // Grab focus on the first appearance.
+                // Debug and Release build using Xcode 26.4,
+                // has same issue again
+                // Fixes: https://github.com/ghostty-org/ghostty/issues/8497
+                // SearchOverlay works magically as expected, I don't know
+                // why it's different here, but dispatching to next loop fixes it
+                DispatchQueue.main.async {
+                    isTextFieldFocused = true
                 }
+            }
         }
     }
 }
@@ -1516,8 +1516,8 @@ private struct CommandRow: View {
                             .fill(Color.secondary.opacity(0.10))
                             .frame(width: 34, height: 34)
                         Image(systemName: icon)
-                        .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
-                        .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
+                            .font(.system(size: 14, weight: .medium))
                     }
                 }
 
