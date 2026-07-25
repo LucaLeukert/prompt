@@ -60,8 +60,9 @@ final class PromptSettings {
                   let migrated = JSONValue(propertyListValue: legacy),
                   let result = migrated.decode(type) else { return nil }
             values[key] = migrated
-            persist()
-            legacyDefaults?.removeObject(forKey: key)
+            if persist() {
+                legacyDefaults?.removeObject(forKey: key)
+            }
             return result
         }
     }
@@ -74,10 +75,16 @@ final class PromptSettings {
         }
     }
 
-    private func persist() {
-        guard let data = try? JSONEncoder.prompt.encode(values) else { return }
-        try? paths.prepare(fileManager: fileManager)
-        try? data.write(to: paths.settings, options: [.atomic])
+    @discardableResult
+    private func persist() -> Bool {
+        do {
+            let data = try JSONEncoder.prompt.encode(values)
+            try paths.prepare(fileManager: fileManager)
+            try data.write(to: paths.settings, options: [.atomic])
+            return true
+        } catch {
+            return false
+        }
     }
 }
 

@@ -118,6 +118,25 @@ final class PromptModelTests: XCTestCase {
         XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(contentsOf: paths.settings)))
     }
 
+    func testPromptSettingsRetainsLegacyValueWhenMigrationCannotBeWritten() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.FailedMigration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(to: home.appendingPathComponent(".prompt"))
+        defaults.set("legacy", forKey: "setting")
+
+        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home), legacyDefaults: defaults)
+        let migrated: String? = settings.value(forKey: "setting")
+
+        XCTAssertEqual(migrated, "legacy")
+        XCTAssertEqual(defaults.string(forKey: "setting"), "legacy")
+    }
+
     func testRemoteConfigurationRoundTrip() throws {
         let remote = PromptRemoteSessionConfiguration(destination: "host", workingDirectory: "/srv/app", persistentSessionName: "prompt", attachOnly: true)
         let value = PromptSessionConfiguration.remote(remote)
