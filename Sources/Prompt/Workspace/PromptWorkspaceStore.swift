@@ -8,24 +8,26 @@ final class PromptWorkspaceStore: ObservableObject {
     @Published var workspace: PromptWorkspace
     @Published var isCommandPalettePresented = false
     @Published var sidebarLayout: SidebarLayout {
-        didSet { UserDefaults.standard.set(sidebarLayout.rawValue, forKey: "PromptSidebarLayout") }
+        didSet { settings.set(sidebarLayout.rawValue, forKey: "PromptSidebarLayout") }
     }
     @Published var sidebarSort: SidebarSort {
-        didSet { UserDefaults.standard.set(sidebarSort.rawValue, forKey: "PromptSidebarSort") }
+        didSet { settings.set(sidebarSort.rawValue, forKey: "PromptSidebarSort") }
     }
     @Published private(set) var sidebarFolders: [String]
     @Published private(set) var sessionFolders: [PromptSession.ID: String]
     @Published private(set) var sidebarVisualOrder: [PromptSession.ID] = []
     private var sessionRecency: [PromptSession.ID: Date] = [:]
     let runtime: PromptTerminalRuntime
+    private let settings: PromptSettings
 
-    init(runtime: PromptTerminalRuntime) {
+    init(runtime: PromptTerminalRuntime, settings: PromptSettings = .shared) {
         self.runtime = runtime
+        self.settings = settings
         workspace = PromptWorkspace(name: "Workspace")
-        sidebarLayout = SidebarLayout(rawValue: UserDefaults.standard.string(forKey: "PromptSidebarLayout") ?? "") ?? .flat
-        sidebarSort = SidebarSort(rawValue: UserDefaults.standard.string(forKey: "PromptSidebarSort") ?? "") ?? .manual
-        sidebarFolders = UserDefaults.standard.stringArray(forKey: "PromptSidebarFolders") ?? []
-        let assignments = UserDefaults.standard.dictionary(forKey: "PromptSidebarAssignments") as? [String: String] ?? [:]
+        sidebarLayout = SidebarLayout(rawValue: settings.value(forKey: "PromptSidebarLayout") ?? "") ?? .flat
+        sidebarSort = SidebarSort(rawValue: settings.value(forKey: "PromptSidebarSort") ?? "") ?? .manual
+        sidebarFolders = settings.value(forKey: "PromptSidebarFolders") ?? []
+        let assignments: [String: String] = settings.value(forKey: "PromptSidebarAssignments") ?? [:]
         sessionFolders = Dictionary(uniqueKeysWithValues: assignments.compactMap { key, value in UUID(uuidString: key).map { ($0, value) } })
         runtime.onRemotePaneInventory = { [weak self] originPaneID, panes in
             self?.reconcileRemotePanes(originPaneID: originPaneID, descriptors: panes)
@@ -211,9 +213,9 @@ final class PromptWorkspaceStore: ObservableObject {
     }
 
     private func persistSidebarFolders() {
-        UserDefaults.standard.set(sidebarFolders, forKey: "PromptSidebarFolders")
+        settings.set(sidebarFolders, forKey: "PromptSidebarFolders")
         let encoded = sessionFolders.reduce(into: [String: String]()) { $0[$1.key.uuidString] = $1.value }
-        UserDefaults.standard.set(encoded, forKey: "PromptSidebarAssignments")
+        settings.set(encoded, forKey: "PromptSidebarAssignments")
     }
 
     private func updateWorkspace(_ update: (inout PromptWorkspace) -> Void) {

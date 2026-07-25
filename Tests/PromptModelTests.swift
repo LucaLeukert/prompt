@@ -321,26 +321,45 @@ final class PromptModelTests: XCTestCase {
     }
 
     @MainActor
-    func testGitDiscoveryCacheIsTrustedBoundedAndRemovesStaleSelections() throws {
+    func testGitDiscoveryCacheUsesPromptCacheAndRemovesStaleSelections() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("prompt-git-cache-\(UUID().uuidString)")
+        let paths = PromptPaths(homeDirectory: home)
         let suite = "PromptGitCacheTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
         let missing = PromptLocalSessionLauncher.GitLocation(
             path: "/missing/worktree",
             repository: "/missing/repository",
             branch: "cached",
             isMainWorktree: false)
 
-        PromptSessionLauncher.rememberGitLocations([missing], defaults: defaults)
-        XCTAssertEqual(PromptSessionLauncher.cachedGitLocations(defaults: defaults), [missing])
+        PromptSessionLauncher.rememberGitLocations(
+            [missing],
+            paths: paths,
+            legacyDefaults: defaults)
+        XCTAssertEqual(
+            PromptSessionLauncher.cachedGitLocations(paths: paths, legacyDefaults: defaults),
+            [missing])
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: paths.cacheFile("git-locations.json").path))
         XCTAssertEqual(
             PromptLocalSessionLauncher.gitLocations(
                 searching: "/definitely/missing",
-                cached: PromptSessionLauncher.cachedGitLocations(defaults: defaults)),
+                cached: PromptSessionLauncher.cachedGitLocations(
+                    paths: paths,
+                    legacyDefaults: defaults)),
             [missing])
 
-        PromptSessionLauncher.forgetCachedGitLocation(missing.path, defaults: defaults)
-        XCTAssertTrue(PromptSessionLauncher.cachedGitLocations(defaults: defaults).isEmpty)
+        PromptSessionLauncher.forgetCachedGitLocation(
+            missing.path,
+            paths: paths,
+            legacyDefaults: defaults)
+        XCTAssertTrue(PromptSessionLauncher.cachedGitLocations(
+            paths: paths,
+            legacyDefaults: defaults).isEmpty)
     }
 
     func testContainerAndPrivilegedCommandsUseShellQuoting() {
@@ -358,6 +377,105 @@ final class PromptModelTests: XCTestCase {
         XCTAssertEqual(
             PromptWorkspaceStore.shellQuote("/tmp/it's here"),
             "'/tmp/it'\\''s here'")
+    }
+
+    func testPromptPathsKeepConfigurationAndCacheUnderPromptHome() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let paths = PromptPaths(homeDirectory: home)
+
+        try paths.prepare()
+
+        XCTAssertEqual(paths.settings.path, home.appendingPathComponent(".prompt/config.json").path)
+        XCTAssertEqual(paths.cacheFile("example.cache").path, home.appendingPathComponent(".prompt/cache/example.cache").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.cache.path))
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    func testPromptSettingsRoundTripsValuesAndMigratesLegacyDefaults() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.Settings.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        defaults.set(["legacy"], forKey: "hosts")
+        let paths = PromptPaths(homeDirectory: home)
+        let settings = PromptSettings(paths: paths, legacyDefaults: [defaults])
+
+        let hosts: [String]? = settings.value(forKey: "hosts")
+        settings.set(["enabled": true], forKey: "features")
+        let reloaded = PromptSettings(paths: paths, legacyDefaults: [])
+        let features: [String: Bool]? = reloaded.value(forKey: "features")
+
+        XCTAssertEqual(hosts, ["legacy"])
+        XCTAssertNil(defaults.object(forKey: "hosts"))
+        XCTAssertEqual(features, ["enabled": true])
+        XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(contentsOf: paths.settings)))
+    }
+
+    func testPromptSettingsRetainsLegacyValueWhenMigrationCannotBeWritten() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.FailedMigration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(to: home.appendingPathComponent(".prompt"))
+        defaults.set("legacy", forKey: "setting")
+
+        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home), legacyDefaults: [defaults])
+        let migrated: String? = settings.value(forKey: "setting")
+
+        XCTAssertEqual(migrated, "legacy")
+        XCTAssertEqual(defaults.string(forKey: "setting"), "legacy")
+    }
+
+    func testPromptSettingsSearchesAllLegacyDefaultsDomains() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let firstSuite = "PromptModelTests.FirstDefaults.\(UUID().uuidString)"
+        let ghosttySuite = "PromptModelTests.GhosttyDefaults.\(UUID().uuidString)"
+        let first = try XCTUnwrap(UserDefaults(suiteName: firstSuite))
+        let ghostty = try XCTUnwrap(UserDefaults(suiteName: ghosttySuite))
+        defer {
+            first.removePersistentDomain(forName: firstSuite)
+            ghostty.removePersistentDomain(forName: ghosttySuite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        ghostty.set(true, forKey: "ghostty-setting")
+
+        let settings = PromptSettings(
+            paths: PromptPaths(homeDirectory: home),
+            legacyDefaults: [first, ghostty])
+        let migrated: Bool? = settings.value(forKey: "ghostty-setting")
+
+        XCTAssertEqual(migrated, true)
+        XCTAssertNil(ghostty.object(forKey: "ghostty-setting"))
+    }
+
+    func testPromptSettingsNeverOverwritesMalformedConfiguration() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.MalformedConfig.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let paths = PromptPaths(homeDirectory: home)
+        try paths.prepare()
+        let malformed = Data(#"{"valid":"value","broken":"#.utf8)
+        try malformed.write(to: paths.settings)
+        defaults.set("legacy", forKey: "legacy-setting")
+
+        let settings = PromptSettings(paths: paths, legacyDefaults: [defaults])
+        settings.set("new", forKey: "new-setting")
+        let legacy: String? = settings.value(forKey: "legacy-setting")
+
+        XCTAssertEqual(legacy, "legacy")
+        XCTAssertEqual(defaults.string(forKey: "legacy-setting"), "legacy")
+        XCTAssertEqual(try Data(contentsOf: paths.settings), malformed)
     }
 
     func testRemoteConfigurationRoundTrip() throws {

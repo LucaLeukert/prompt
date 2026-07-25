@@ -9,7 +9,7 @@ enum PromptExperimentalFeatures {
     static let remoteAIEnabledDefaultsKey = "PromptExperimentalRemoteAIEnabled"
 
     static var remoteAIEnabled: Bool {
-        remoteAIEnabled(in: .ghostty)
+        PromptSettings.shared.value(forKey: remoteAIEnabledDefaultsKey) ?? false
     }
 
     static func remoteAIEnabled(in defaults: UserDefaults) -> Bool {
@@ -408,8 +408,8 @@ private final class PromptCodexAgentBridge {
     init?(paneID: PromptPane.ID, workingDirectory: String) {
         guard FileManager.default.isExecutableFile(atPath: PromptAgentCommand.codex) else { return nil }
         executable = PromptAgentCommand.codex
-        socketDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/prompt/codex-\(paneID.uuidString)", isDirectory: true).path
+        socketDirectory = PromptPaths().cache
+            .appendingPathComponent("codex-\(paneID.uuidString)", isDirectory: true).path
         socketPath = "\(socketDirectory)/proxy.sock"
         upstreamSocketPath = "\(socketDirectory)/server.sock"
         launcherPath = "\(socketDirectory)/launch.command"

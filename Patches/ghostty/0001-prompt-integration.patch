@@ -170,7 +170,7 @@ index 6d883ded8..cfba5644d 100644
  				"Features/Custom App Icon/AppIcon.swift",
  				"Features/Custom App Icon/ColorizedGhosttyIcon.swift",
  				"Features/Custom App Icon/ColorizedGhosttyIconImage.swift",
-@@ -258,21 +308,82 @@
+@@ -258,21 +308,83 @@
  			);
  			target = A5D4499C2B53AE7B000F5B83 /* Ghostty-iOS */;
  		};
@@ -192,6 +192,7 @@ index 6d883ded8..cfba5644d 100644
 +				Prompt/PromptCompletionContextEngine.swift,
 +				Prompt/Terminal/PromptTerminalSurface.swift,
 +				Prompt/App/PromptApplicationDelegate.swift,
++				Prompt/App/PromptStorage.swift,
 +				Prompt/App/PromptMain.swift,
 +				Prompt/App/PromptWindowController.swift,
 +				Prompt/Workspace/PromptWorkspaceStore.swift,

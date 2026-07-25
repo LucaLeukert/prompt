@@ -164,6 +164,7 @@ struct PromptRemoteSession: Codable, Hashable {
     private static let savedKey = "PromptPersistentRemoteSessions"
     private static let tailnetSavedKey = "PromptDiscoveredTailnetHosts"
     private static let gitLocationsCacheKey = "PromptDiscoveredGitLocations"
+    private static let gitLocationsCacheFileName = "git-locations.json"
     private static let gitLocationsCacheLimit = 40
     private static var tailnetCache: (date: Date, hosts: [String])?
 
@@ -307,40 +308,68 @@ struct PromptRemoteSession: Codable, Hashable {
             details: details)
     }
 
-    static func cachedGitLocations(defaults: UserDefaults = .standard) -> [PromptLocalSessionLauncher.GitLocation] {
-        guard let data = defaults.data(forKey: gitLocationsCacheKey),
+    static func cachedGitLocations(
+        paths: PromptPaths = PromptPaths(),
+        legacyDefaults: UserDefaults = .standard
+    ) -> [PromptLocalSessionLauncher.GitLocation] {
+        let cacheFile = paths.cacheFile(gitLocationsCacheFileName)
+        if let data = try? Data(contentsOf: cacheFile),
+           let locations = try? JSONDecoder().decode(
+               [PromptLocalSessionLauncher.GitLocation].self,
+               from: data)
+        {
+            return Array(locations.prefix(gitLocationsCacheLimit))
+        }
+
+        guard let data = legacyDefaults.data(forKey: gitLocationsCacheKey),
               let locations = try? JSONDecoder().decode(
                   [PromptLocalSessionLauncher.GitLocation].self,
                   from: data)
-        else {
-            return []
+        else { return [] }
+
+        let bounded = Array(locations.prefix(gitLocationsCacheLimit))
+        if persistGitLocations(bounded, paths: paths) {
+            legacyDefaults.removeObject(forKey: gitLocationsCacheKey)
         }
-        return Array(locations.prefix(gitLocationsCacheLimit))
+        return bounded
     }
 
     static func rememberGitLocations(
         _ locations: [PromptLocalSessionLauncher.GitLocation],
-        defaults: UserDefaults = .standard
+        paths: PromptPaths = PromptPaths(),
+        legacyDefaults: UserDefaults = .standard
     ) {
-        let existing = cachedGitLocations(defaults: defaults)
+        let existing = cachedGitLocations(paths: paths, legacyDefaults: legacyDefaults)
         let refreshedPaths = Set(locations.map(\.path))
         let ordered = locations + existing.filter { !refreshedPaths.contains($0.path) }
         let bounded = Array(ordered.prefix(gitLocationsCacheLimit))
-        if let data = try? JSONEncoder().encode(bounded) {
-            defaults.set(data, forKey: gitLocationsCacheKey)
-        }
+        _ = persistGitLocations(bounded, paths: paths)
     }
 
     static func forgetCachedGitLocation(
         _ path: String,
-        defaults: UserDefaults = .standard
+        paths: PromptPaths = PromptPaths(),
+        legacyDefaults: UserDefaults = .standard
     ) {
         let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
-        let remaining = cachedGitLocations(defaults: defaults).filter {
+        let remaining = cachedGitLocations(paths: paths, legacyDefaults: legacyDefaults).filter {
             URL(fileURLWithPath: $0.path).standardizedFileURL.path != normalized
         }
-        if let data = try? JSONEncoder().encode(remaining) {
-            defaults.set(data, forKey: gitLocationsCacheKey)
+        _ = persistGitLocations(remaining, paths: paths)
+    }
+
+    @discardableResult
+    private static func persistGitLocations(
+        _ locations: [PromptLocalSessionLauncher.GitLocation],
+        paths: PromptPaths
+    ) -> Bool {
+        do {
+            try paths.prepare()
+            let data = try JSONEncoder().encode(locations)
+            try data.write(to: paths.cacheFile(gitLocationsCacheFileName), options: [.atomic])
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -492,9 +521,7 @@ struct PromptRemoteSession: Codable, Hashable {
     }
 
     static var savedRemoteSessions: [PromptRemoteSession] {
-        guard let data = UserDefaults.standard.data(forKey: savedKey),
-              let value = try? JSONDecoder().decode([PromptRemoteSession].self, from: data) else { return [] }
-        return value
+        PromptSettings.shared.value(forKey: savedKey) ?? []
     }
 
     static func refreshTailnetDiscovery() {
@@ -640,7 +667,7 @@ struct PromptRemoteSession: Codable, Hashable {
         if let cache = tailnetCache, Date().timeIntervalSince(cache.date) < 30 {
             return cache.hosts
         }
-        let lastSuccessfulHosts = UserDefaults.standard.stringArray(forKey: tailnetSavedKey) ?? []
+        let lastSuccessfulHosts: [String] = PromptSettings.shared.value(forKey: tailnetSavedKey) ?? []
         guard let executable = tailscaleExecutable else {
             logger.error("Tailscale executable was not found")
             return lastSuccessfulHosts
@@ -672,7 +699,7 @@ struct PromptRemoteSession: Codable, Hashable {
                 continue
             }
             tailnetCache = (Date(), hosts)
-            UserDefaults.standard.set(hosts, forKey: tailnetSavedKey)
+            PromptSettings.shared.set(hosts, forKey: tailnetSavedKey)
             logger.info("Tailscale status returned \(data.count) bytes and \(hosts.count) SSH candidates: \(hosts.joined(separator: ","), privacy: .public)")
             return hosts
         }
@@ -739,7 +766,7 @@ struct PromptRemoteSession: Codable, Hashable {
     private static func remember(_ descriptor: PromptRemoteSession) {
         var values = savedRemoteSessions.filter { $0.destination != descriptor.destination || $0.session != descriptor.session }
         values.insert(descriptor, at: 0)
-        if let data = try? JSONEncoder().encode(Array(values.prefix(12))) { UserDefaults.standard.set(data, forKey: savedKey) }
+        PromptSettings.shared.set(Array(values.prefix(12)), forKey: savedKey)
     }
 
     private static func remoteDirectories(host: String, at directory: String) async throws -> [PromptFolderPickerEntry] {
