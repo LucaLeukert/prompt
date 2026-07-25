@@ -443,20 +443,38 @@ struct PromptCommandPaletteContentView: View {
 
                         HStack(spacing: 16) {
                             PaletteHint(keys: ["↑", "↓"], label: "Navigate")
-                            PaletteHint(keys: ["↩"], label: "Select")
+                            if navigation.isAtRoot {
+                                PaletteHint(keys: ["↩"], label: "Select")
+                            }
                             Spacer()
                             if let selectedOption {
                                 Button {
                                     activate(selectedOption)
                                 } label: {
-                                    PaletteHint(
-                                        keys: ["↩"],
-                                        label: selectedOption.opensRoute ? "Open" : "Run")
+                                    if navigation.isAtRoot {
+                                        PaletteHint(
+                                            keys: ["↩"],
+                                            label: selectedOption.opensRoute ? "Open" : "Run")
+                                    } else {
+                                        PaletteLabelFirstHint(
+                                            label: selectedOption.opensRoute ? "Open" : "Run",
+                                            keys: ["↩"])
+                                    }
                                 }
                                 .promptGlassButtonStyle()
 
+                                if !navigation.isAtRoot {
+                                    Divider()
+                                        .frame(height: 18)
+                                        .opacity(0.45)
+                                }
+
                                 Button { toggleActions() } label: {
-                                    PaletteHint(keys: ["⌘", "K"], label: "Actions")
+                                    if navigation.isAtRoot {
+                                        PaletteHint(keys: ["⌘", "K"], label: "Actions")
+                                    } else {
+                                        PaletteLabelFirstHint(label: "Actions", keys: ["⌘", "K"])
+                                    }
                                 }
                                 .promptGlassButtonStyle()
                             }
