@@ -1018,6 +1018,16 @@ index c52961ce5..b836e27ea 100644
  
                  // Determine if we even care about command finish notifications
                  guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
+@@ -1671,6 +1696,9 @@ extension Ghostty {
+             case GHOSTTY_TARGET_SURFACE:
+                 guard let surface = target.target.surface else { return false }
+                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
++                if MainActor.assumeIsolated({
++                    GhosttyAppKitHooks.childDidExit?(surfaceView, Int(v.exit_code))
++                }) == true { return true }
+                 // We handle this when the window is visible and timetime_ms is greater than 0,
+                 // which will rule out exit codes on launch
+                 guard surfaceView.window != nil, v.timetime_ms > 0 else { return false }
 diff --git a/macos/Sources/Ghostty/Ghostty.Config.swift b/macos/Sources/Ghostty/Ghostty.Config.swift
 index d7134029d..a0c47f893 100644
 --- a/macos/Sources/Ghostty/Ghostty.Config.swift

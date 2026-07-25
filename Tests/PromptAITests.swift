@@ -7,6 +7,18 @@ import Testing
 
 @Suite("Prompt AI integration")
 struct PromptAITests {
+    @Test @MainActor func currentDirectoryActionsKeepSpecializedSessionTypesOutOfTheRootPalette() {
+        #expect(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.title) == [
+            "Anchored session",
+            "Run task…",
+            "Disposable session…",
+            "Scratch workspace",
+            "Privileged session…",
+            "Codex agent",
+        ])
+        #expect(Set(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.icon)).count == 6)
+    }
+
     @Test func tmuxControlOutputDecodesOctalAndEscapedBackslashes() {
         #expect(PromptTmuxControlParser.decode(#"hello\015\012path\\name"#) == Array("hello\r\npath\\name".utf8))
     }

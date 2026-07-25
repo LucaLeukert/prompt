@@ -1168,7 +1168,7 @@ final class PromptModel: ObservableObject {
     @Published var status = "Starting Codex…"
     @Published var account = "Codex"
     @Published var rateLimits = "Limits loading…"
-    @Published var projectRoot = FileManager.default.currentDirectoryPath
+    @Published var projectRoot = FileManager.default.homeDirectoryForCurrentUser.path
     @Published var terminalContext = ""
     @Published var threads: [PromptThread] = []
     @Published var activeThreadID: String?
@@ -2097,7 +2097,7 @@ final class PromptAutocompleteModel: ObservableObject {
         didSet { UserDefaults.ghostty.set(completesAIInput, forKey: Self.completeAIInputDefaultsKey) }
     }
     private let copilot = PromptCopilotCompletionServer()
-    private var startupCWD = FileManager.default.currentDirectoryPath
+    private var startupCWD = FileManager.default.homeDirectoryForCurrentUser.path
     private var activeSurfaceID: ObjectIdentifier?
     private weak var activeSurface: PromptTerminalSurface?
     private var activePrefix = ""
@@ -2489,7 +2489,7 @@ final class PromptCopilotCompletionServer {
     private let queue = DispatchQueue(label: "dev.prompt.copilot-lsp")
     private var initialized = false
     private var starting = false
-    private var workspace = FileManager.default.currentDirectoryPath
+    private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     private var documentURI = ""
     private var documentVersion = 0
     private var pendingCompletion: (prefix: String, cwd: String, terminal: String, completion: ([String]) -> Void)?
@@ -2936,7 +2936,7 @@ final class PromptController: NSObject {
     private weak var terminalWindow: NSWindow?
 
     func install() {
-        let cwd = activeSurface()?.pwd ?? FileManager.default.currentDirectoryPath
+        let cwd = activeSurface()?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         PromptModel.shared.start(cwd: cwd)
     }
 

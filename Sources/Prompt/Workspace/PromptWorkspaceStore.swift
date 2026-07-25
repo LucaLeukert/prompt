@@ -30,23 +30,45 @@ final class PromptWorkspaceStore: ObservableObject {
         runtime.onRemotePaneInventory = { [weak self] originPaneID, panes in
             self?.reconcileRemotePanes(originPaneID: originPaneID, descriptors: panes)
         }
+        runtime.onLocalCommandFinished = { [weak self] paneID, exitCode, childExited in
+            self?.localCommandFinished(paneID: paneID, exitCode: exitCode, childExited: childExited)
+        }
     }
 
     @discardableResult
-    func createLocal(directory: String, command: String? = nil, title: String? = nil) -> PromptSession? {
+    func createLocal(
+        directory: String,
+        command: String? = nil,
+        title: String? = nil,
+        behavior: PromptLocalSessionConfiguration.Behavior = .standard,
+        details: PromptLocalSessionDetails? = nil,
+        environment: [String: String] = [:]
+    ) -> PromptSession? {
         let pane = PromptPane(title: title ?? URL(fileURLWithPath: directory).lastPathComponent)
-        let config = PromptSessionConfiguration.local(.init(workingDirectory: directory, command: command))
+        let config = PromptSessionConfiguration.local(.init(
+            workingDirectory: directory,
+            command: command,
+            environment: environment,
+            behavior: behavior,
+            details: details))
         guard runtime.createSurface(for: pane, configuration: config) != nil else { return nil }
+        resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
         let session = PromptSession(title: title ?? pane.title, configuration: config, rootPane: pane)
         updateWorkspace { $0.append(session) }
         return session
     }
 
     @discardableResult
-    func createRemote(_ config: PromptRemoteSessionConfiguration, title: String? = nil) -> PromptSession? {
+    func createRemote(_ requestedConfiguration: PromptRemoteSessionConfiguration, title: String? = nil) -> PromptSession? {
+        var config = requestedConfiguration
+        if config.transport == .controlMode,
+           config.persistentSessionName?.isEmpty != false {
+            config.persistentSessionName = PromptSessionLauncher.newRemoteSessionName()
+        }
         let pane = PromptPane(title: title ?? config.destination)
         let sessionConfig = PromptSessionConfiguration.remote(config)
         guard runtime.createSurface(for: pane, configuration: sessionConfig) != nil else { return nil }
+        resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
         let session = PromptSession(title: title ?? config.destination, configuration: sessionConfig, rootPane: pane)
         updateWorkspace { $0.append(session) }
         return session
@@ -78,6 +100,9 @@ final class PromptWorkspaceStore: ObservableObject {
 
     func focus(sessionID: PromptSession.ID, paneID: PromptPane.ID) {
         guard workspace.sessions.contains(where: { $0.id == sessionID }) else { return }
+        if workspace.focusedSessionID != sessionID {
+            resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
+        }
         updateWorkspace {
             $0.focusedSessionID = sessionID
             guard let index = $0.sessions.firstIndex(where: { $0.id == sessionID }) else { return }
@@ -148,6 +173,7 @@ final class PromptWorkspaceStore: ObservableObject {
         session.splitTree.panes.forEach { closeRuntimePane($0.id) }
         sessionFolders.removeValue(forKey: id)
         persistSidebarFolders()
+        cleanupOwnedResources(for: session)
     }
 
     func renameSidebarFolder(_ oldName: String, to rawName: String) {
@@ -168,6 +194,22 @@ final class PromptWorkspaceStore: ObservableObject {
 
     func folder(for session: PromptSession) -> String? { sessionFolders[session.id] }
 
+    /// Returns a codable snapshot enriched with ephemeral terminal state.
+    /// This deliberately does not publish a workspace mutation: persistence is
+    /// itself triggered by `$workspace`, so mutating here would recurse.
+    func workspaceForRestoration() -> PromptWorkspace {
+        var updated = workspace
+        for sessionIndex in updated.sessions.indices {
+            guard case .local(var configuration) = updated.sessions[sessionIndex].configuration,
+                  configuration.behavior == .standard,
+                  let directory = runtime.surface(for: updated.sessions[sessionIndex].focusedPaneID)?.workingDirectory,
+                  !directory.isEmpty, directory != configuration.workingDirectory else { continue }
+            configuration.workingDirectory = directory
+            updated.sessions[sessionIndex].configuration = .local(configuration)
+        }
+        return updated
+    }
+
     private func persistSidebarFolders() {
         UserDefaults.standard.set(sidebarFolders, forKey: "PromptSidebarFolders")
         let encoded = sessionFolders.reduce(into: [String: String]()) { $0[$1.key.uuidString] = $1.value }
@@ -178,6 +220,62 @@ final class PromptWorkspaceStore: ObservableObject {
         var updated = workspace
         update(&updated)
         workspace = updated
+    }
+
+    private func resetAnchoredSessionIfNeeded(id: PromptSession.ID?) {
+        guard let id,
+              let session = workspace.sessions.first(where: { $0.id == id }),
+              case .local(let configuration) = session.configuration,
+              configuration.behavior == .anchored else { return }
+
+        let command = "cd -- \(Self.shellQuote(configuration.workingDirectory)) && clear"
+        for pane in session.splitTree.panes {
+            guard let surface = runtime.surface(for: pane.id) else { continue }
+            surface.interruptForegroundProcess()
+            surface.sendText(command)
+            PromptController.pressReturn(on: surface)
+        }
+    }
+
+    nonisolated static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func localCommandFinished(paneID: PromptPane.ID, exitCode: Int32, childExited: Bool) {
+        guard let index = workspace.sessions.firstIndex(where: {
+            $0.splitTree.panes.contains(where: { $0.id == paneID })
+        }), case .local(var configuration) = workspace.sessions[index].configuration else { return }
+        configuration.lastExitCode = exitCode
+        updateWorkspace { $0.sessions[index].configuration = .local(configuration) }
+        if configuration.behavior == .disposable,
+           configuration.command != nil || childExited {
+            let sessionID = workspace.sessions[index].id
+            // Completion is delivered only after the command has exited. Any
+            // password prompt, TTY confirmation, or other interaction keeps
+            // the process alive and therefore keeps the session open.
+            DispatchQueue.main.async { [weak self] in self?.closeSession(sessionID) }
+        }
+    }
+
+    private func cleanupOwnedResources(for session: PromptSession) {
+        guard case .local(let configuration) = session.configuration else { return }
+        if configuration.behavior == .scratch,
+           let directory = configuration.details?.scratchDirectory {
+            do { try PromptLocalSessionLauncher.cleanupScratchDirectory(directory) }
+            catch { NSLog("Prompt scratch cleanup interrupted: %@", error.localizedDescription) }
+        }
+        if configuration.behavior == .worktree,
+           configuration.details?.worktreeOwnership == .prompt,
+           let repository = configuration.details?.repository,
+           let path = configuration.details?.worktreePath {
+            let worktree = PromptLocalSessionLauncher.Worktree(
+                path: path,
+                repository: repository,
+                branch: configuration.details?.branch,
+                isMain: false)
+            do { try PromptLocalSessionLauncher.removePromptWorktree(worktree, ownership: .prompt) }
+            catch { NSLog("Prompt worktree cleanup interrupted: %@", error.localizedDescription) }
+        }
     }
 
     private func focusCurrentSession() {

@@ -14,6 +14,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     private var shortcutMonitor: Any?
     private var workspaceObservation: AnyCancellable?
     private var explicitQuitRequested = false
+    private var isPersistingRestorationState = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -131,8 +132,29 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
            let state = try? JSONDecoder().decode(PromptRestorationState.self, from: data),
            var restored = state.workspaces.first {
             restoredWindowFrame = state.windowFrame
+            restored.sessions.removeAll {
+                guard case .local(let configuration) = $0.configuration else { return false }
+                return configuration.behavior == .disposable
+            }
             for index in restored.sessions.indices {
                 restored.sessions[index].collapseToFocusedPane()
+                if case .local(var configuration) = restored.sessions[index].configuration {
+                    var isDirectory: ObjCBool = false
+                    let exists = FileManager.default.fileExists(
+                        atPath: configuration.workingDirectory,
+                        isDirectory: &isDirectory)
+                    if !exists || !isDirectory.boolValue {
+                        configuration.workingDirectory = FileManager.default.homeDirectoryForCurrentUser.path
+                        restored.sessions[index].configuration = .local(configuration)
+                    }
+                    // Never repeat a completed task or an elevation request
+                    // merely because the application was relaunched.
+                    if (configuration.behavior == .task && configuration.lastExitCode != nil)
+                        || configuration.behavior == .privileged {
+                        configuration.command = nil
+                        restored.sessions[index].configuration = .local(configuration)
+                    }
+                }
                 let session = restored.sessions[index]
                 for pane in session.splitTree.panes {
                     _ = runtime.createSurface(for: pane, configuration: session.configuration)
@@ -141,7 +163,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
             workspaceStore.workspace = restored
         }
         if workspaceStore.workspace.sessions.isEmpty {
-            workspaceStore.createLocal(directory: FileManager.default.currentDirectoryPath)
+            workspaceStore.createLocal(directory: FileManager.default.homeDirectoryForCurrentUser.path)
         }
         let controller = PromptWindowController(store: workspaceStore)
         windowController = controller
@@ -153,12 +175,24 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func persistRestorationState() {
+        // Persistence is normally driven by `$workspace`. Keep this guard even
+        // though workspaceForRestoration returns a value snapshot: it prevents
+        // any future restoration enrichment from recursively publishing and
+        // overflowing the main-thread stack while a session is being created.
+        guard !isPersistingRestorationState else { return }
+        isPersistingRestorationState = true
+        defer { isPersistingRestorationState = false }
+
+        let workspace = workspaceStore.workspaceForRestoration()
         let state = PromptRestorationState(
-            workspaces: [workspaceStore.workspace],
-            selectedWorkspaceID: workspaceStore.workspace.id,
+            workspaces: [workspace],
+            selectedWorkspaceID: workspace.id,
             windowFrame: windowController?.window.map { NSStringFromRect($0.frame) })
         if let data = try? JSONEncoder().encode(state) {
             UserDefaults.standard.set(data, forKey: "PromptRestorationState")
+            // Command-Q terminates immediately after this callback. Force the
+            // restoration payload to disk before the process exits.
+            UserDefaults.standard.synchronize()
         }
     }
 

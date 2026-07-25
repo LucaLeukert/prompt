@@ -63,6 +63,13 @@ enum PromptTerminalIntegration {
                     Notification.Name.CommandDurationNanosecondsKey: duration,
                 ])
         }
+        GhosttyAppKitHooks.childDidExit = { view, exitCode in
+            NotificationCenter.default.post(
+                name: .promptTerminalChildExited,
+                object: PromptTerminalSurface.wrap(view),
+                userInfo: [Notification.Name.CommandExitCodeKey: exitCode])
+            return true
+        }
         GhosttyAppKitHooks.keyDown = handleKeyDown
     }
 
@@ -130,6 +137,7 @@ enum PromptTerminalIntegration {
 
 extension Notification.Name {
     static let ghosttyCommandDidFinish = Notification.Name("dev.prompt.commandDidFinish")
+    static let promptTerminalChildExited = Notification.Name("dev.prompt.childExited")
     static let CommandExitCodeKey = ghosttyCommandDidFinish.rawValue + ".exitCode"
     static let CommandDurationNanosecondsKey = ghosttyCommandDidFinish.rawValue + ".durationNanoseconds"
     static let promptRemoteControlC = Notification.Name("dev.prompt.remoteControlC")

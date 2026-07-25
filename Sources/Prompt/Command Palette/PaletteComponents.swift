@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 private struct PromptGlassEffectContainer<Content: View>: View {
     let spacing: CGFloat
@@ -212,11 +213,14 @@ struct PromptCommandPaletteContentView: View {
     var options: [PromptCommandOption]
     @State private var rawQuery = ""
     @State private var selectedIndex: UInt? = 0
-    @State private var hoveredOptionID: UUID?
     @State private var pages: [(title: String, options: [PromptCommandOption])] = []
     @State private var folderPicker: PromptFolderPickerConfiguration?
     @State private var sidebarEditor: PromptWorkspaceStore?
     @State private var actionsArePresented = false
+    @State private var suppressesTransitionFocusLoss = false
+    @State private var submitGate = PromptPaletteSubmitGate()
+    @State private var pointerLocationAtKeyboardNavigation: CGPoint?
+    @State private var pointerTrackingStarted = false
 
     private var visibleOptions: [PromptCommandOption] { pages.last?.options ?? options }
 
@@ -278,17 +282,20 @@ struct PromptCommandPaletteContentView: View {
                 title: pages.last?.title,
                 canGoBack: !pages.isEmpty,
                 dismissOnFocusLoss: !actionsArePresented,
+                suppressesFocusLoss: $suppressesTransitionFocusLoss,
                 onBack: goBack
             ) { event in
                 switch event {
                 case .exit:
+                    guard !suppressesTransitionFocusLoss else { break }
                     if pages.isEmpty { isPresented = false } else { goBack() }
 
                 case .submit:
-                    if let selectedOption { activate(selectedOption) }
+                    submitFromKeyboard()
 
                 case .move(.up):
                     if filteredOptions.isEmpty { break }
+                    pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
                     let current = selectedIndex ?? UInt(filteredOptions.count)
                     selectedIndex = (current == 0)
                         ? UInt(filteredOptions.count - 1)
@@ -296,6 +303,7 @@ struct PromptCommandPaletteContentView: View {
 
                 case .move(.down):
                     if filteredOptions.isEmpty { break }
+                    pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
                     let current = selectedIndex ?? UInt.max
                     selectedIndex = (current >= UInt(filteredOptions.count - 1))
                         ? 0
@@ -319,7 +327,16 @@ struct PromptCommandPaletteContentView: View {
                 options: filteredOptions,
                 query: query,
                 selectedIndex: $selectedIndex,
-                hoveredOptionID: $hoveredOptionID) { option in
+                onPointerSelection: { index in
+                    let location = NSEvent.mouseLocation
+                    guard pointerTrackingStarted else { return }
+                    guard PromptPalettePointerPolicy.hasMoved(
+                        from: pointerLocationAtKeyboardNavigation,
+                        to: location
+                    ) else { return }
+                    pointerLocationAtKeyboardNavigation = nil
+                    selectedIndex = UInt(index)
+                }) { option in
                     activate(option)
             }
 
@@ -375,11 +392,19 @@ struct PromptCommandPaletteContentView: View {
             cornerRadius: 28)
         .padding()
         .environment(\.colorScheme, scheme)
+        .onAppear {
+            pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+            pointerTrackingStarted = true
+        }
         .onChange(of: isPresented) { newValue in
-            if !newValue {
+            if newValue {
+                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+                pointerTrackingStarted = true
+            } else {
                 // This is optional, since most of the time
                 // there will be a delay before the next use.
                 // To keep behavior the same as before, we reset it.
+                pointerTrackingStarted = false
                 rawQuery = ""
                 selectedIndex = 0
                 pages = []
@@ -393,16 +418,38 @@ struct PromptCommandPaletteContentView: View {
     private func activate(_ option: PromptCommandOption) {
         actionsArePresented = false
         if let picker = option.folderPicker {
+            beginInternalNavigation()
             folderPicker = picker
         } else if let editor = option.sidebarEditor {
+            beginInternalNavigation()
             sidebarEditor = editor
         } else if let children = option.children {
-            pages.append((option.title, children()))
+            let childOptions = children()
+            beginInternalNavigation()
+            pages.append((option.title, childOptions))
             rawQuery = ""
             selectedIndex = 0
         } else {
             isPresented = false
             option.action()
+        }
+    }
+
+    private func submitFromKeyboard() {
+        guard submitGate.begin(), let selectedOption else { return }
+        activate(selectedOption)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            submitGate.reset()
+        }
+    }
+
+    private func beginInternalNavigation() {
+        suppressesTransitionFocusLoss = true
+        // Replacing the palette's text field temporarily clears AppKit focus.
+        // Ignore only that internal handoff; ordinary focus loss should still
+        // dismiss the palette.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            suppressesTransitionFocusLoss = false
         }
     }
 
@@ -444,6 +491,20 @@ struct PromptCommandPaletteContentView: View {
         }
 
         return bestScore
+    }
+}
+
+struct PromptPaletteSubmitGate {
+    private(set) var isLatched = false
+
+    mutating func begin() -> Bool {
+        guard !isLatched else { return false }
+        isLatched = true
+        return true
+    }
+
+    mutating func reset() {
+        isLatched = false
     }
 }
 
@@ -608,6 +669,8 @@ struct PromptFolderPickerEntry: Identifiable, Hashable {
     var id: String { path }
     let name: String
     let path: String
+    var subtitle: String? = nil
+    var icon: String = "folder"
 }
 
 struct PromptFolderPickerConfiguration {
@@ -616,6 +679,52 @@ struct PromptFolderPickerConfiguration {
     let directories: (String) async throws -> [PromptFolderPickerEntry]
     let onSelect: (String) -> Void
     let onReveal: ((String) -> Void)?
+    var createDirectory: ((String) throws -> Void)? = nil
+    var sectionTitle = "Directories"
+    var actionTitle = "Add"
+    var emptyText = "No subdirectories"
+    var selectsEntries = false
+}
+
+enum PromptFolderPath {
+    struct BrowsingContext: Equatable {
+        let directory: String
+        let query: String
+        let exists: Bool
+    }
+
+    static func resolve(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(
+            fileURLWithPath: (trimmed as NSString).expandingTildeInPath
+        ).standardizedFileURL.path
+    }
+
+    static func existingDirectory(_ value: String, fileManager: FileManager = .default) -> String? {
+        guard let resolved = resolve(value) else { return nil }
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: resolved, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        return resolved
+    }
+
+    static func browsingContext(
+        _ value: String,
+        fileManager: FileManager = .default
+    ) -> BrowsingContext? {
+        guard let resolved = resolve(value) else { return nil }
+        if existingDirectory(resolved, fileManager: fileManager) != nil {
+            return BrowsingContext(directory: resolved, query: "", exists: true)
+        }
+        let url = URL(fileURLWithPath: resolved)
+        let parent = url.deletingLastPathComponent().path
+        guard existingDirectory(parent, fileManager: fileManager) != nil else { return nil }
+        return BrowsingContext(
+            directory: parent,
+            query: url.lastPathComponent,
+            exists: false)
+    }
 }
 
 private struct FolderPickerView: View {
@@ -629,6 +738,8 @@ private struct FolderPickerView: View {
     @State private var selectedIndex = 0
     @State private var loadError: String?
     @State private var isLoading = false
+    @State private var prefersParentSelection = false
+    @StateObject private var keyMonitor = PromptFolderPickerKeyMonitor()
     @FocusState private var pathFocused: Bool
 
     init(configuration: PromptFolderPickerConfiguration, isPresented: Binding<Bool>, onBack: @escaping () -> Void) {
@@ -650,6 +761,26 @@ private struct FolderPickerView: View {
         return parent.isEmpty ? "/" : parent
     }
 
+    private var typedContext: PromptFolderPath.BrowsingContext? {
+        guard configuration.createDirectory != nil else { return nil }
+        return PromptFolderPath.browsingContext(pathField)
+    }
+
+    private var visibleEntries: [PromptFolderPickerEntry] {
+        guard let query = typedContext?.query, !query.isEmpty else { return entries }
+        return entries.filter {
+            $0.name.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive, .anchored]
+            ) != nil
+        }
+    }
+
+    private var actionTitle: String {
+        if typedContext?.exists == false { return "Create & Add" }
+        return configuration.actionTitle
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
@@ -665,11 +796,26 @@ private struct FolderPickerView: View {
                     .font(.system(size: 17, weight: .semibold))
                     .textFieldStyle(.plain)
                     .focused($pathFocused)
-                    .onSubmit { choose(pathField) }
+                    .onChange(of: pathField) { value in
+                        // Keep the user's spelling and caret untouched while
+                        // making both complete paths and partial final
+                        // components drive the directory list.
+                        let followsNavigation = value == configuration.displayName(directory)
+                        if !followsNavigation { prefersParentSelection = false }
+                        let nextDirectory = configuration.createDirectory == nil
+                            ? PromptFolderPath.existingDirectory(value)
+                            : PromptFolderPath.browsingContext(value)?.directory
+                        guard let nextDirectory, nextDirectory != directory else {
+                            updateDefaultSelection()
+                            return
+                        }
+                        directory = nextDirectory
+                        updateDefaultSelection()
+                    }
 
                 Button { chooseCurrentDirectory() } label: {
                     HStack(spacing: 8) {
-                        Text("Add")
+                        Text(actionTitle)
                             .foregroundStyle(.primary)
                         Text("⌘ Enter")
                             .foregroundStyle(.tertiary)
@@ -688,28 +834,13 @@ private struct FolderPickerView: View {
             }
             .padding(.horizontal, 18)
             .frame(height: 62)
-            .background {
-                Group {
-                    Button { moveSelection(.up) } label: { Color.clear }
-                        .keyboardShortcut(.upArrow, modifiers: [])
-                    Button { moveSelection(.down) } label: { Color.clear }
-                        .keyboardShortcut(.downArrow, modifiers: [])
-                    Button { goToParent() } label: { Color.clear }
-                        .keyboardShortcut(.delete, modifiers: [])
-                    Button { openSelected() } label: { Color.clear }
-                        .keyboardShortcut(.return, modifiers: [])
-                }
-                .buttonStyle(.plain)
-                .frame(width: 0, height: 0)
-                .accessibilityHidden(true)
-            }
 
             Divider().opacity(0.55)
 
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 3) {
-                        Text("Directories")
+                        Text(configuration.sectionTitle)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.tertiary)
                             .padding(.horizontal, 12)
@@ -717,15 +848,20 @@ private struct FolderPickerView: View {
 
                         if let parentPath {
                             FolderPickerRow(name: "..", icon: "arrow.turn.up.left", selected: selectedIndex == 0) {
-                                navigate(to: parentPath)
+                                navigate(to: parentPath, preferringParent: true)
                             }
                             .id("__parent")
                         }
 
-                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                        ForEach(Array(visibleEntries.enumerated()), id: \.element.id) { index, entry in
                             let rowIndex = index + (parentPath == nil ? 0 : 1)
-                            FolderPickerRow(name: entry.name, icon: "folder", selected: selectedIndex == rowIndex) {
-                                navigate(to: entry.path)
+                            FolderPickerRow(
+                                name: entry.name,
+                                subtitle: entry.subtitle,
+                                icon: entry.icon,
+                                selected: selectedIndex == rowIndex)
+                            {
+                                activate(entry)
                             }
                             .id(entry.id)
                         }
@@ -737,8 +873,10 @@ private struct FolderPickerView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .padding(18)
-                        } else if entries.isEmpty && parentPath == nil {
-                            Text("No subdirectories")
+                        } else if visibleEntries.isEmpty {
+                            Text(typedContext?.query.isEmpty == false
+                                ? "No matching directories"
+                                : configuration.emptyText)
                                 .foregroundStyle(.secondary)
                                 .padding(18)
                         }
@@ -750,7 +888,9 @@ private struct FolderPickerView: View {
                     if selectedIndex == 0, parentPath != nil { proxy.scrollTo("__parent") }
                     else {
                         let offset = selectedIndex - (parentPath == nil ? 0 : 1)
-                        if entries.indices.contains(offset) { proxy.scrollTo(entries[offset].id) }
+                        if visibleEntries.indices.contains(offset) {
+                            proxy.scrollTo(visibleEntries[offset].id)
+                        }
                     }
                 }
             }
@@ -780,47 +920,75 @@ private struct FolderPickerView: View {
         .onExitCommand { isPresented = false }
         .task(id: directory) { await loadDirectory() }
         .onAppear { DispatchQueue.main.async { pathFocused = false } }
+        .onReceive(keyMonitor.$action.compactMap { $0 }) { action in
+            switch action {
+            case .up: moveSelection(.up)
+            case .down: moveSelection(.down)
+            case .open: openSelected()
+            case .parent: goToParent()
+            }
+            keyMonitor.action = nil
+        }
     }
 
     private func openSelected() {
-        if selectedIndex == 0, let parentPath { navigate(to: parentPath); return }
+        if selectedIndex == 0, let parentPath {
+            navigate(to: parentPath, preferringParent: true)
+            return
+        }
         let offset = selectedIndex - (parentPath == nil ? 0 : 1)
-        if entries.indices.contains(offset) { navigate(to: entries[offset].path) }
+        if visibleEntries.indices.contains(offset) { activate(visibleEntries[offset]) }
     }
 
-    private func navigate(to value: String) {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        directory = trimmed
-        pathField = configuration.displayName(trimmed)
-        selectedIndex = 0
+    private func activate(_ entry: PromptFolderPickerEntry) {
+        if configuration.selectsEntries {
+            isPresented = false
+            configuration.onSelect(entry.path)
+        } else {
+            navigate(to: entry.path)
+        }
+    }
+
+    private func navigate(to value: String, preferringParent: Bool = false) {
+        guard let resolved = PromptFolderPath.resolve(value) else { return }
+        prefersParentSelection = preferringParent
+        directory = resolved
+        pathField = configuration.displayName(resolved)
+        updateDefaultSelection()
     }
 
     private func moveSelection(_ direction: MoveCommandDirection) {
         // Arrow navigation deliberately leaves path editing and hands focus to
         // the directory list, so the following Return opens the highlighted row.
         pathFocused = false
-        let count = entries.count + (parentPath == nil ? 0 : 1)
+        let count = visibleEntries.count + (parentPath == nil ? 0 : 1)
         guard count > 0 else { return }
         if direction == .up { selectedIndex = selectedIndex == 0 ? count - 1 : selectedIndex - 1 }
         if direction == .down { selectedIndex = (selectedIndex + 1) % count }
     }
 
     private func goToParent() {
-        // NSTextField owns Delete while editing, preserving normal character deletion.
-        guard !pathFocused, let parentPath else { return }
-        navigate(to: parentPath)
+        guard let parentPath else { return }
+        navigate(to: parentPath, preferringParent: true)
     }
 
     private func choose(_ value: String) {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard let resolved = PromptFolderPath.resolve(value) else { return }
+        if PromptFolderPath.existingDirectory(resolved) == nil,
+           let createDirectory = configuration.createDirectory {
+            do {
+                try createDirectory(resolved)
+            } catch {
+                loadError = error.localizedDescription
+                return
+            }
+        }
         isPresented = false
-        configuration.onSelect(trimmed)
+        configuration.onSelect(resolved)
     }
 
     private func chooseCurrentDirectory() {
-        choose(pathFocused ? pathField : directory)
+        choose(pathField)
     }
 
     private func loadDirectory() async {
@@ -832,13 +1000,94 @@ private struct FolderPickerView: View {
             entries = []
             loadError = error.localizedDescription
         }
-        selectedIndex = 0
+        updateDefaultSelection()
         isLoading = false
+    }
+
+    private func updateDefaultSelection() {
+        selectedIndex = PromptFolderPickerSelectionPolicy.defaultIndex(
+            hasParent: parentPath != nil,
+            entryCount: visibleEntries.count,
+            prefersParent: prefersParentSelection)
+    }
+}
+
+enum PromptFolderPickerSelectionPolicy {
+    static func defaultIndex(
+        hasParent: Bool,
+        entryCount: Int,
+        prefersParent: Bool
+    ) -> Int {
+        if hasParent, prefersParent { return 0 }
+        if entryCount > 0 { return hasParent ? 1 : 0 }
+        return 0
+    }
+}
+
+enum PromptFolderPickerKeyboardPolicy {
+    static func shouldNavigateToParent(isListNavigationActive: Bool) -> Bool {
+        isListNavigationActive
+    }
+}
+
+@MainActor
+private final class PromptFolderPickerKeyMonitor: ObservableObject {
+    enum Action { case up, down, open, parent }
+
+    @Published var action: Action?
+    private var isListNavigationActive = false
+    private var keyMonitor: Any?
+    private var mouseMonitor: Any?
+
+    init() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self else { return event }
+                guard event.modifierFlags
+                    .intersection([.command, .shift, .option, .control]).isEmpty
+                else { return event }
+                switch event.keyCode {
+                case 126:
+                    self.isListNavigationActive = true
+                    self.action = .up
+                case 125:
+                    self.isListNavigationActive = true
+                    self.action = .down
+                case 36, 76:
+                    self.action = .open
+                case 51:
+                    guard PromptFolderPickerKeyboardPolicy.shouldNavigateToParent(
+                        isListNavigationActive: self.isListNavigationActive
+                    ) else { return event }
+                    self.action = .parent
+                default:
+                    // Typing resumes direct path editing, so subsequent
+                    // Backspace belongs to the field editor.
+                    self.isListNavigationActive = false
+                    return event
+                }
+                return nil
+            }
+        }
+        mouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.isListNavigationActive = false
+                return event
+            }
+        }
+    }
+
+    deinit {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        if let mouseMonitor { NSEvent.removeMonitor(mouseMonitor) }
     }
 }
 
 private struct FolderPickerRow: View {
     let name: String
+    var subtitle: String? = nil
     let icon: String
     let selected: Bool
     let action: () -> Void
@@ -850,12 +1099,20 @@ private struct FolderPickerRow: View {
                     .font(.system(size: 15, weight: .regular))
                     .foregroundStyle(.secondary)
                     .frame(width: 24)
-                Text(name)
-                    .font(.system(size: 15, weight: .medium))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .font(.system(size: 15, weight: .medium))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
+                }
                 Spacer()
             }
             .padding(.horizontal, 10)
-            .frame(height: 34)
+            .frame(height: subtitle == nil ? 34 : 46)
             .background(selected ? Color.secondary.opacity(0.11) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .contentShape(Rectangle())
         }
@@ -876,12 +1133,12 @@ private struct CommandActionsView: View {
 
     private var actions: [PromptCommandAction] {
         if let customActions { return customActions }
-        if let contextualActions = option.contextualActions { return contextualActions() }
-        return [PromptCommandAction(
+        let primary = PromptCommandAction(
             title: option.primaryActionTitle,
             icon: "return",
             shortcut: ["↩"],
-            action: onPrimary)]
+            action: onPrimary)
+        return [primary] + (option.contextualActions?() ?? [])
     }
 
     private var filteredActions: [PromptCommandAction] {
@@ -898,39 +1155,47 @@ private struct CommandActionsView: View {
                 .padding(.horizontal, 14)
                 .frame(height: 44)
 
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(Array(filteredActions.enumerated()), id: \.element.id) { index, item in
-                        Button { perform(item) } label: {
-                            HStack(spacing: 11) {
-                                Image(systemName: item.icon)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .frame(width: 20)
-                                Text(item.title)
-                                    .font(.system(size: 14, weight: .medium))
-                                Spacer()
-                                if !item.shortcut.isEmpty {
-                                    HStack(spacing: 3) {
-                                        ForEach(item.shortcut, id: \.self) { key in
-                                            Text(key)
-                                                .font(.system(size: 11, weight: .semibold))
-                                                .foregroundStyle(.secondary)
-                                                .padding(.horizontal, 6)
-                                                .frame(height: 24)
-                                                .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        ForEach(Array(filteredActions.enumerated()), id: \.offset) { index, item in
+                            Button { perform(item) } label: {
+                                HStack(spacing: 11) {
+                                    Image(systemName: item.icon)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .frame(width: 20)
+                                    Text(item.title)
+                                        .font(.system(size: 14, weight: .medium))
+                                    Spacer()
+                                    if !item.shortcut.isEmpty {
+                                        HStack(spacing: 3) {
+                                            ForEach(item.shortcut, id: \.self) { key in
+                                                Text(key)
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(.secondary)
+                                                    .padding(.horizontal, 6)
+                                                    .frame(height: 24)
+                                                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                                            }
                                         }
                                     }
                                 }
+                                .padding(.horizontal, 11)
+                                .frame(height: 40)
+                                .background(index == selectedIndex ? Color.secondary.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .contentShape(Rectangle())
                             }
-                            .padding(.horizontal, 11)
-                            .frame(height: 40)
-                            .background(index == selectedIndex ? Color.secondary.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .id(index)
                         }
-                        .buttonStyle(.plain)
+                    }
+                    .padding(8)
+                }
+                .onChange(of: selectedIndex) { index in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(index, anchor: .center)
                     }
                 }
-                .padding(8)
             }
             .frame(maxHeight: 205)
 
@@ -1017,15 +1282,17 @@ private struct CommandPaletteQuery: View {
     var title: String?
     var canGoBack: Bool
     var dismissOnFocusLoss: Bool
+    @Binding var suppressesFocusLoss: Bool
     var onBack: () -> Void
     var onEvent: ((KeyboardEvent) -> Void)?
     @FocusState private var isTextFieldFocused: Bool
 
-    init(query: Binding<String>, title: String?, canGoBack: Bool, dismissOnFocusLoss: Bool, onBack: @escaping () -> Void, onEvent: ((KeyboardEvent) -> Void)? = nil) {
+    init(query: Binding<String>, title: String?, canGoBack: Bool, dismissOnFocusLoss: Bool, suppressesFocusLoss: Binding<Bool>, onBack: @escaping () -> Void, onEvent: ((KeyboardEvent) -> Void)? = nil) {
         _query = query
         self.title = title
         self.canGoBack = canGoBack
         self.dismissOnFocusLoss = dismissOnFocusLoss
+        _suppressesFocusLoss = suppressesFocusLoss
         self.onBack = onBack
         self.onEvent = onEvent
     }
@@ -1078,7 +1345,11 @@ private struct CommandPaletteQuery: View {
                 .frame(height: 62)
                 .textFieldStyle(.plain)
                 .onChange(of: isTextFieldFocused) { focused in
-                    if !focused && dismissOnFocusLoss {
+                    if PromptPaletteFocusLossPolicy.shouldDismiss(
+                        focused: focused,
+                        dismissOnFocusLoss: dismissOnFocusLoss,
+                        suppressesFocusLoss: suppressesFocusLoss)
+                    {
                         onEvent?(.exit)
                     }
                 }
@@ -1100,11 +1371,33 @@ private struct CommandPaletteQuery: View {
     }
 }
 
+struct PromptPaletteFocusLossPolicy {
+    static func shouldDismiss(
+        focused: Bool,
+        dismissOnFocusLoss: Bool,
+        suppressesFocusLoss: Bool
+    ) -> Bool {
+        !focused && dismissOnFocusLoss && !suppressesFocusLoss
+    }
+}
+
+struct PromptPalettePointerPolicy {
+    static func hasMoved(
+        from keyboardLocation: CGPoint?,
+        to currentLocation: CGPoint,
+        tolerance: CGFloat = 0.5
+    ) -> Bool {
+        guard let keyboardLocation else { return true }
+        return abs(currentLocation.x - keyboardLocation.x) > tolerance ||
+            abs(currentLocation.y - keyboardLocation.y) > tolerance
+    }
+}
+
 private struct CommandTable: View {
     var options: [PromptCommandOption]
     var query: String
     @Binding var selectedIndex: UInt?
-    @Binding var hoveredOptionID: UUID?
+    var onPointerSelection: (Int) -> Void
     var action: (PromptCommandOption) -> Void
 
     var body: some View {
@@ -1138,7 +1431,9 @@ private struct CommandTable: View {
                                         return false
                                     }
                                 }(),
-                                hoveredID: $hoveredOptionID
+                                onHover: {
+                                    onPointerSelection(index)
+                                }
                             ) {
                                 action(option)
                             }
@@ -1163,7 +1458,7 @@ private struct CommandRow: View {
     let option: PromptCommandOption
     var query: String
     var isSelected: Bool
-    @Binding var hoveredID: UUID?
+    var onHover: () -> Void
     var action: () -> Void
 
     private var highlightedTitle: Text {
@@ -1220,7 +1515,7 @@ private struct CommandRow: View {
                 if let icon = option.leadingIcon {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.10))
+                            .fill(Color.secondary.opacity(0.10))
                             .frame(width: 34, height: 34)
                         Image(systemName: icon)
                         .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
@@ -1266,12 +1561,12 @@ private struct CommandRow: View {
             .padding(.vertical, 8)
             .contentShape(Rectangle())
             .background(
-                isSelected
-                    ? Color.primary.opacity(0.095)
-                    : (hoveredID == option.id
-                       ? Color.primary.opacity(0.055)
-                       : Color.clear)
+                isSelected ? Color.primary.opacity(0.055) : Color.clear,
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
             )
+            .scaleEffect(isSelected ? 1.012 : 1, anchor: .leading)
+            .offset(x: isSelected ? 3 : 0)
+            .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isSelected)
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(Color.accentColor.opacity(option.emphasis && !isSelected ? 0.3 : 0), lineWidth: 1.5)
@@ -1280,8 +1575,8 @@ private struct CommandRow: View {
         }
         .help(option.description ?? "")
         .buttonStyle(.plain)
-        .onHover { hovering in
-            hoveredID = hovering ? option.id : nil
+        .onContinuousHover { phase in
+            if case .active = phase { onHover() }
         }
     }
 }
