@@ -1895,75 +1895,91 @@ private struct CommandRow: View {
         return Text(attributed)
     }
 
+    private var fixedTrailingWidth: CGFloat {
+        let symbolCount = option.symbols?.count ?? 0
+        let symbolsWidth = symbolCount == 0 ? 0 : CGFloat(symbolCount * 13 + symbolCount - 1)
+        let showsChevron = option.opensRoute && isSelected
+        return symbolsWidth + (symbolCount > 0 && showsChevron ? 10 : 0) + (showsChevron ? 8 : 0)
+    }
+
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
-                if let color = option.leadingColor {
-                    Circle()
-                        .fill(color)
-                        .frame(width: 8, height: 8)
-                }
+            ZStack(alignment: .trailing) {
+                HStack(spacing: 12) {
+                    if let color = option.leadingColor {
+                        Circle()
+                            .fill(color)
+                            .frame(width: 8, height: 8)
+                    }
 
-                if let icon = option.leadingIcon {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.secondary.opacity(0.10))
-                            .frame(width: 34, height: 34)
-                        Image(systemName: icon)
-                            .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
-                            .font(.system(size: 14, weight: .medium))
+                    if let icon = option.leadingIcon {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.secondary.opacity(0.10))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: icon)
+                                .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        highlightedTitle
+
+                        if let subtitle = option.subtitle {
+                            highlightedSubtitle(subtitle)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Spacer()
+
+                    if let badge = option.badge, !badge.isEmpty {
+                        Text(badge)
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(
+                                Capsule().fill(Color.accentColor.opacity(0.15))
+                            )
+                            .foregroundStyle(Color.accentColor)
                     }
                 }
+                .padding(.horizontal, 10)
+                .padding(.trailing, fixedTrailingWidth)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+                .background(
+                    isSelected ? Color.primary.opacity(0.055) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                )
+                .scaleEffect(isSelected ? 1.012 : 1, anchor: .leading)
+                .offset(x: isSelected ? 3 : 0)
+                .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isSelected)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.accentColor.opacity(option.emphasis && !isSelected ? 0.3 : 0), lineWidth: 1.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                VStack(alignment: .leading, spacing: 2) {
-                    highlightedTitle
-
-                    if let subtitle = option.subtitle {
-                        highlightedSubtitle(subtitle)
-                            .font(.caption)
+                HStack(spacing: 10) {
+                    if let symbols = option.symbols {
+                        ShortcutSymbolsView(symbols: symbols)
                             .foregroundStyle(.secondary)
                     }
+                    if option.opensRoute, isSelected {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .transition(.opacity)
+                    }
                 }
-
-                Spacer()
-
-                if let badge = option.badge, !badge.isEmpty {
-                    Text(badge)
-                        .font(.caption2.weight(.medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(
-                            Capsule().fill(Color.accentColor.opacity(0.15))
-                        )
-                        .foregroundStyle(Color.accentColor)
-                }
-
-                if let symbols = option.symbols {
-                    ShortcutSymbolsView(symbols: symbols)
-                        .foregroundStyle(.secondary)
-                }
-
-                if option.opensRoute {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
+                .padding(.trailing, 10)
+                .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isSelected)
+                .allowsHitTesting(false)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
             .contentShape(Rectangle())
-            .background(
-                isSelected ? Color.primary.opacity(0.055) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-            )
-            .scaleEffect(isSelected ? 1.012 : 1, anchor: .leading)
-            .offset(x: isSelected ? 3 : 0)
-            .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isSelected)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.accentColor.opacity(option.emphasis && !isSelected ? 0.3 : 0), lineWidth: 1.5)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .help(option.description ?? "")
         .buttonStyle(.plain)
