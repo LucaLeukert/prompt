@@ -105,11 +105,11 @@ final class PromptModelTests: XCTestCase {
         }
         defaults.set(["legacy"], forKey: "hosts")
         let paths = PromptPaths(homeDirectory: home)
-        let settings = PromptSettings(paths: paths, legacyDefaults: defaults)
+        let settings = PromptSettings(paths: paths, legacyDefaults: [defaults])
 
         let hosts: [String]? = settings.value(forKey: "hosts")
         settings.set(["enabled": true], forKey: "features")
-        let reloaded = PromptSettings(paths: paths, legacyDefaults: nil)
+        let reloaded = PromptSettings(paths: paths, legacyDefaults: [])
         let features: [String: Bool]? = reloaded.value(forKey: "features")
 
         XCTAssertEqual(hosts, ["legacy"])
@@ -130,11 +130,33 @@ final class PromptModelTests: XCTestCase {
         try Data("not a directory".utf8).write(to: home.appendingPathComponent(".prompt"))
         defaults.set("legacy", forKey: "setting")
 
-        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home), legacyDefaults: defaults)
+        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home), legacyDefaults: [defaults])
         let migrated: String? = settings.value(forKey: "setting")
 
         XCTAssertEqual(migrated, "legacy")
         XCTAssertEqual(defaults.string(forKey: "setting"), "legacy")
+    }
+
+    func testPromptSettingsSearchesAllLegacyDefaultsDomains() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let firstSuite = "PromptModelTests.FirstDefaults.\(UUID().uuidString)"
+        let ghosttySuite = "PromptModelTests.GhosttyDefaults.\(UUID().uuidString)"
+        let first = try XCTUnwrap(UserDefaults(suiteName: firstSuite))
+        let ghostty = try XCTUnwrap(UserDefaults(suiteName: ghosttySuite))
+        defer {
+            first.removePersistentDomain(forName: firstSuite)
+            ghostty.removePersistentDomain(forName: ghosttySuite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        ghostty.set(true, forKey: "ghostty-setting")
+
+        let settings = PromptSettings(
+            paths: PromptPaths(homeDirectory: home),
+            legacyDefaults: [first, ghostty])
+        let migrated: Bool? = settings.value(forKey: "ghostty-setting")
+
+        XCTAssertEqual(migrated, true)
+        XCTAssertNil(ghostty.object(forKey: "ghostty-setting"))
     }
 
     func testRemoteConfigurationRoundTrip() throws {

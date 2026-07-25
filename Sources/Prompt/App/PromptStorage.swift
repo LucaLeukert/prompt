@@ -36,14 +36,14 @@ final class PromptSettings {
 
     private let paths: PromptPaths
     private let fileManager: FileManager
-    private let legacyDefaults: UserDefaults?
+    private let legacyDefaults: [UserDefaults]
     private let lock = NSLock()
     private var values: [String: JSONValue]
 
     init(
         paths: PromptPaths = PromptPaths(),
         fileManager: FileManager = .default,
-        legacyDefaults: UserDefaults? = .standard
+        legacyDefaults: [UserDefaults] = [.ghostty, .standard]
     ) {
         self.paths = paths
         self.fileManager = fileManager
@@ -56,12 +56,13 @@ final class PromptSettings {
     func value<T: Codable>(_ type: T.Type = T.self, forKey key: String) -> T? {
         lock.withLock {
             if let stored = values[key] { return stored.decode(type) }
-            guard let legacy = legacyDefaults?.object(forKey: key),
+            guard let source = legacyDefaults.first(where: { $0.object(forKey: key) != nil }),
+                  let legacy = source.object(forKey: key),
                   let migrated = JSONValue(propertyListValue: legacy),
                   let result = migrated.decode(type) else { return nil }
             values[key] = migrated
             if persist() {
-                legacyDefaults?.removeObject(forKey: key)
+                source.removeObject(forKey: key)
             }
             return result
         }
