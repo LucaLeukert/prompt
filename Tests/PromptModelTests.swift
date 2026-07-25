@@ -159,6 +159,29 @@ final class PromptModelTests: XCTestCase {
         XCTAssertNil(ghostty.object(forKey: "ghostty-setting"))
     }
 
+    func testPromptSettingsNeverOverwritesMalformedConfiguration() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.MalformedConfig.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        let paths = PromptPaths(homeDirectory: home)
+        try paths.prepare()
+        let malformed = Data(#"{"valid":"value","broken":"#.utf8)
+        try malformed.write(to: paths.settings)
+        defaults.set("legacy", forKey: "legacy-setting")
+
+        let settings = PromptSettings(paths: paths, legacyDefaults: [defaults])
+        settings.set("new", forKey: "new-setting")
+        let legacy: String? = settings.value(forKey: "legacy-setting")
+
+        XCTAssertEqual(legacy, "legacy")
+        XCTAssertEqual(defaults.string(forKey: "legacy-setting"), "legacy")
+        XCTAssertEqual(try Data(contentsOf: paths.settings), malformed)
+    }
+
     func testRemoteConfigurationRoundTrip() throws {
         let remote = PromptRemoteSessionConfiguration(destination: "host", workingDirectory: "/srv/app", persistentSessionName: "prompt", attachOnly: true)
         let value = PromptSessionConfiguration.remote(remote)

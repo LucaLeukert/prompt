@@ -39,6 +39,7 @@ final class PromptSettings {
     private let legacyDefaults: [UserDefaults]
     private let lock = NSLock()
     private var values: [String: JSONValue]
+    private let canPersist: Bool
 
     init(
         paths: PromptPaths = PromptPaths(),
@@ -49,8 +50,22 @@ final class PromptSettings {
         self.fileManager = fileManager
         self.legacyDefaults = legacyDefaults
         try? paths.prepare(fileManager: fileManager)
-        values = (try? Data(contentsOf: paths.settings))
-            .flatMap { try? JSONDecoder().decode([String: JSONValue].self, from: $0) } ?? [:]
+        if fileManager.fileExists(atPath: paths.settings.path) {
+            if let data = try? Data(contentsOf: paths.settings),
+               let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
+                values = decoded
+                canPersist = true
+            } else {
+                // Never replace an existing configuration that we cannot
+                // understand. Reads can still fall back to legacy defaults,
+                // but writes remain disabled until the file is repaired.
+                values = [:]
+                canPersist = false
+            }
+        } else {
+            values = [:]
+            canPersist = true
+        }
     }
 
     func value<T: Codable>(_ type: T.Type = T.self, forKey key: String) -> T? {
@@ -78,6 +93,7 @@ final class PromptSettings {
 
     @discardableResult
     private func persist() -> Bool {
+        guard canPersist else { return false }
         do {
             let data = try JSONEncoder.prompt.encode(values)
             try paths.prepare(fileManager: fileManager)
