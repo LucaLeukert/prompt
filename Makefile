@@ -3,7 +3,8 @@ SHELL := /bin/sh
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 GHOSTTY := $(ROOT)/Vendor/ghostty
-PROJECT := $(GHOSTTY)/macos/Ghostty.xcodeproj
+GHOSTTY_BUILD := $(ROOT)/.build/ghostty
+PROJECT := $(ROOT)/Prompt.xcodeproj
 CONFIGURATION ?= Debug
 XCFRAMEWORK_TARGET ?= $(if $(filter Debug,$(CONFIGURATION)),native,universal)
 DERIVED_DATA := $(ROOT)/DerivedData
@@ -14,7 +15,7 @@ EXECUTABLE := $(APP)/Contents/MacOS/Prompt
 # prefix after it installs zig@0.15, so first-time setup works on either CPU.
 ZIG ?=
 
-.PHONY: help build run test lint format lint-install xcode clean prepare sync check-app
+.PHONY: help build run test lint format lint-install xcode clean prepare sync patch-check project check-app check-vendor
 
 help:
 	@echo "Prompt local development"
@@ -22,14 +23,18 @@ help:
 	@echo "  make run    Rebuild and launch $(APP)"
 	@echo "  make build  Build the complete app bundle"
 	@echo "  make test   Run the Prompt test suite"
-	@echo "  make lint   Check Swift formatting, Swift rules, and Actions"
+	@echo "  make lint   Check formatting, project generation, patches, and Actions"
+	@echo "  make patch-check  Verify every Prompt patch against pinned Ghostty"
 	@echo "  make format Apply the repository Swift formatting rules"
-	@echo "  make lint-install  Install local lint and format tools"
-	@echo "  make xcode  Prepare and open the native Xcode workspace"
+	@echo "  make lint-install  Install local build and lint tools"
+	@echo "  make xcode  Prepare and open the Prompt-owned Xcode project"
 	@echo "  make clean  Remove repo-local generated output"
 	@echo
 	@echo "Override the Xcode configuration with CONFIGURATION=Release."
 
+# Prepare an isolated Ghostty worktree. The pinned submodule always remains
+# pristine, and every sync starts from its exact commit before applying Prompt's
+# small, ordered integration patches.
 sync:
 	@set -eu; \
 	if [ ! -d "$(GHOSTTY)/.git" ] && [ ! -f "$(GHOSTTY)/.git" ]; then \
@@ -39,37 +44,28 @@ sync:
 		echo "Ghostty submodule is missing after initialization." >&2; \
 		exit 1; \
 	fi; \
-	rm -rf "$(GHOSTTY)/macos/Sources/Prompt" "$(GHOSTTY)/macos/Sources/GhosttyAppKit"; \
-	mkdir -p "$(GHOSTTY)/macos/Sources" "$(GHOSTTY)/macos/Tests" \
-		"$(GHOSTTY)/macos/Resources" \
-		"$(GHOSTTY)/macos/Ghostty.xcodeproj/xcshareddata/xcschemes"; \
-	cp -R "$(ROOT)/Sources/Prompt" "$(GHOSTTY)/macos/Sources/Prompt"; \
-	cp -R "$(ROOT)/Sources/GhosttyAppKit" "$(GHOSTTY)/macos/Sources/GhosttyAppKit"; \
-	cp "$(ROOT)/Tests/PromptAITests.swift" "$(ROOT)/Tests/PromptModelTests.swift" \
-		"$(GHOSTTY)/macos/Tests/"; \
-	rm -rf "$(GHOSTTY)/macos/Resources/Prompt" "$(GHOSTTY)/images/Prompt.icon"; \
-	cp -R "$(ROOT)/Resources/Prompt" "$(GHOSTTY)/macos/Resources/Prompt"; \
-	cp -R "$(ROOT)/Resources/Prompt.icon" "$(GHOSTTY)/images/Prompt.icon"; \
-	cp "$(ROOT)/Sources/Prompt.xcscheme" \
-		"$(GHOSTTY)/macos/Ghostty.xcodeproj/xcshareddata/xcschemes/Prompt.xcscheme"; \
-	patch="$(ROOT)/Patches/ghostty/0001-prompt-integration.patch"; \
-	applied_patch="$$(git -C "$(GHOSTTY)" rev-parse --git-path prompt-applied.patch)"; \
-	if git -C "$(GHOSTTY)" apply --reverse --check "$$patch" 2>/dev/null; then \
-		cp "$$patch" "$$applied_patch"; \
-	else \
-		if [ -f "$$applied_patch" ]; then \
-			if ! git -C "$(GHOSTTY)" apply --reverse --check "$$applied_patch"; then \
-				echo "Ghostty contains changes that conflict with the previously applied Prompt patch." >&2; \
-				echo "Resolve or discard those changes before running make sync again." >&2; \
-				exit 1; \
-			fi; \
-			git -C "$(GHOSTTY)" apply --reverse "$$applied_patch"; \
-		fi; \
-		git -C "$(GHOSTTY)" apply "$$patch"; \
-		cp "$$patch" "$$applied_patch"; \
-	fi
+	$(MAKE) --no-print-directory check-vendor; \
+	if [ ! -e "$(GHOSTTY_BUILD)/.git" ]; then \
+		mkdir -p "$(ROOT)/.build"; \
+		git -C "$(GHOSTTY)" worktree add --detach "$(GHOSTTY_BUILD)" HEAD; \
+	fi; \
+	git -C "$(GHOSTTY_BUILD)" reset --hard "$$(git -C "$(GHOSTTY)" rev-parse HEAD)" >/dev/null; \
+	for patch in "$(ROOT)"/Patches/ghostty/*.patch; do \
+		echo "Applying $${patch#$(ROOT)/}"; \
+		git -C "$(GHOSTTY_BUILD)" apply --check "$$patch"; \
+		git -C "$(GHOSTTY_BUILD)" apply "$$patch"; \
+	done
 
-prepare: sync
+patch-check: sync
+
+project: sync
+	@command -v xcodegen >/dev/null || { echo "Missing xcodegen; run: make lint-install" >&2; exit 1; }
+	xcodegen generate --spec "$(ROOT)/project.yml" --project "$(ROOT)"
+	@mkdir -p "$(PROJECT)/project.xcworkspace/xcshareddata/swiftpm"
+	@cp "$(ROOT)/Config/Package.resolved" \
+		"$(PROJECT)/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+
+prepare: project
 	@set -eu; \
 	if [ -n "$(ZIG)" ]; then \
 		zig="$(ZIG)"; \
@@ -83,18 +79,17 @@ prepare: sync
 		echo "Zig executable is missing: $$zig" >&2; \
 		exit 1; \
 	fi; \
-	rm -rf "$(GHOSTTY)/macos/GhosttyKit.xcframework"; \
-	cd "$(GHOSTTY)"; \
+	cd "$(GHOSTTY_BUILD)"; \
 	env -u SWIFT_DEBUG_INFORMATION_FORMAT -u SWIFT_DEBUG_INFORMATION_VERSION \
 	"$$zig" build -Demit-xcframework=true -Demit-macos-app=false \
 		-Dxcframework-target="$(XCFRAMEWORK_TARGET)"; \
-	if [ ! -d "$(GHOSTTY)/zig-out/share/terminfo" ]; then \
+	if [ ! -d "$(GHOSTTY_BUILD)/zig-out/share/terminfo" ]; then \
 		if [ ! -d "/Applications/Ghostty.app/Contents/Resources" ]; then \
 			echo "Ghostty resources are missing; install Ghostty.app once to seed them." >&2; \
 			exit 1; \
 		fi; \
-		mkdir -p "$(GHOSTTY)/zig-out/share"; \
-		cp -R "/Applications/Ghostty.app/Contents/Resources/." "$(GHOSTTY)/zig-out/share/"; \
+		mkdir -p "$(GHOSTTY_BUILD)/zig-out/share"; \
+		cp -R "/Applications/Ghostty.app/Contents/Resources/." "$(GHOSTTY_BUILD)/zig-out/share/"; \
 	fi
 
 build: prepare
@@ -105,6 +100,8 @@ build: prepare
 		-configuration "$(CONFIGURATION)" \
 		-derivedDataPath "$(DERIVED_DATA)" \
 		CONFIGURATION_BUILD_DIR="$(ARTIFACT_DIR)" \
+		-disableAutomaticPackageResolution \
+		-onlyUsePackageVersionsFromResolvedFile \
 		CODE_SIGNING_ALLOWED=NO \
 		build
 	$(MAKE) --no-print-directory check-app
@@ -143,20 +140,36 @@ lint:
 	@command -v swiftformat >/dev/null || { echo "Missing swiftformat; run: make lint-install" >&2; exit 1; }
 	@command -v swiftlint >/dev/null || { echo "Missing swiftlint; run: make lint-install" >&2; exit 1; }
 	@command -v actionlint >/dev/null || { echo "Missing actionlint; run: make lint-install" >&2; exit 1; }
+	@command -v xcodegen >/dev/null || { echo "Missing xcodegen; run: make lint-install" >&2; exit 1; }
 	swiftformat Sources Tests --lint --reporter github-actions-log
 	swiftlint lint --strict
 	actionlint
+	$(MAKE) --no-print-directory project
 	git diff --check
+	$(MAKE) --no-print-directory check-vendor
 
 format:
 	@command -v swiftformat >/dev/null || { echo "Missing swiftformat; run: make lint-install" >&2; exit 1; }
 	swiftformat Sources Tests
 
 lint-install:
-	HOMEBREW_NO_AUTO_UPDATE=1 brew install swiftformat swiftlint actionlint
+	HOMEBREW_NO_AUTO_UPDATE=1 brew install swiftformat swiftlint actionlint xcodegen
 
 xcode: prepare
-	open "$(ROOT)/Prompt.xcworkspace"
+	open "$(PROJECT)"
 
 clean:
-	rm -rf "$(ROOT)/Artifacts" "$(ROOT)/DerivedData"
+	@set -eu; \
+	if [ -e "$(GHOSTTY_BUILD)/.git" ]; then \
+		git -C "$(GHOSTTY)" worktree remove --force "$(GHOSTTY_BUILD)"; \
+	fi; \
+	rm -rf "$(ROOT)/Artifacts" "$(ROOT)/DerivedData" "$(ROOT)/Prompt.xcodeproj"
+
+check-vendor:
+	@set -eu; \
+	status="$$(git -C "$(GHOSTTY)" status --porcelain)"; \
+	if [ -n "$$status" ]; then \
+		echo "Vendor/ghostty must remain pristine; generated integration belongs in .build/ghostty." >&2; \
+		printf '%s\n' "$$status" >&2; \
+		exit 1; \
+	fi

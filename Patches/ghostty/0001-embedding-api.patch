@@ -1,0 +1,251 @@
+diff --git a/include/ghostty.h b/include/ghostty.h
+index ee8aa8bcb..16195f3d5 100644
+--- a/include/ghostty.h
++++ b/include/ghostty.h
+@@ -1196,6 +1196,8 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
+ GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
++// True while the terminal is displaying the alternate screen used by TUIs.
++GHOSTTY_API bool ghostty_surface_is_alternate_screen(ghostty_surface_t);
+ GHOSTTY_API bool ghostty_surface_scrollbar(ghostty_surface_t,
+                                           ghostty_surface_scrollbar_s*);
+ // Atomically validates the row-space identity and scrolls to an absolute row.
+@@ -1238,6 +1240,10 @@ GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t)
+ // delivery for libghostty embedders.
+ GHOSTTY_API void ghostty_surface_text_input(ghostty_surface_t, const char*, uintptr_t);
+ GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
++// Prompt fork: write already-encoded terminal input to an exec surface. This
++// lets a manual-IO presentation surface forward keys, mouse reports, paste and
++// IME bytes to a hidden authoritative PTY without re-encoding them as text.
++GHOSTTY_API void ghostty_surface_write_input(ghostty_surface_t, const char*, uintptr_t);
+ // cmux fork: upstream already has internal Termio.processOutput. Delete this
+ // C bridge when upstream exports an equivalent surface output API.
+ GHOSTTY_API void ghostty_surface_process_output(ghostty_surface_t, const char*, uintptr_t);
+@@ -1267,6 +1273,12 @@ GHOSTTY_API void ghostty_surface_mouse_scroll(ghostty_surface_t,
+                                                  ghostty_input_scroll_mods_t);
+ GHOSTTY_API void ghostty_surface_mouse_pressure(ghostty_surface_t, uint32_t, double);
+ GHOSTTY_API void ghostty_surface_ime_point(ghostty_surface_t, double*, double*, double*, double*);
++// Prompt fork: returns the OSC 133 input owned by the child line editor.
++// Release successful results with ghostty_surface_free_text.
++GHOSTTY_API bool ghostty_surface_read_prompt_input(ghostty_surface_t, ghostty_text_s*);
++// Prompt fork: native inline composers can own the caret without mutating the
++// child terminal's DEC cursor-visible mode.
++GHOSTTY_API void ghostty_surface_set_host_cursor_visible(ghostty_surface_t, bool);
+ GHOSTTY_API void ghostty_surface_request_close(ghostty_surface_t);
+ GHOSTTY_API void ghostty_surface_split(ghostty_surface_t, ghostty_action_split_direction_e);
+ GHOSTTY_API void ghostty_surface_split_focus(ghostty_surface_t,
+diff --git a/src/Surface.zig b/src/Surface.zig
+index 41f7052ee..12922e89c 100644
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -195,6 +195,19 @@ pub const InputEffect = enum {
+     closed,
+ };
+
++/// Give or take rendering ownership of the grid cursor. This does not modify
++/// the terminal's cursor-visible mode, so child applications retain their
++/// exact state while a native host composer is active.
++pub fn setHostCursorVisible(self: *Surface, visible: bool) void {
++    _ = self.renderer_thread.mailbox.push(
++        .{ .host_cursor_visible = visible },
++        .{ .forever = {} },
++    );
++    self.queueRender() catch |err| {
++        log.warn("failed to redraw host cursor visibility err={}", .{err});
++    };
++}
++
+ /// The search state for the surface.
+ const Search = struct {
+     state: terminal.search.Thread,
+@@ -944,6 +957,18 @@ fn queueIo(
+     self.io.queueMessage(msg, mutex);
+ }
+
++/// Queue bytes that have already been encoded as terminal input. Embedded
++/// composite renderers use this to connect a manual-IO presentation surface to
++/// the PTY owned by a second authoritative surface.
++pub fn writeInput(self: *Surface, data: []const u8) !void {
++    if (data.len == 0) return;
++    self.queueIo(try termio.Message.writeReq(self.alloc, data), .unlocked);
++
++    self.renderer_state.mutex.lock();
++    defer self.renderer_state.mutex.unlock();
++    try self.scrollToBottom();
++}
++
+ /// Forces the surface to render. This is useful for when the surface
+ /// is in the middle of animation (such as a resize, etc.) or when
+ /// the render timer is managed manually by the apprt.
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index 017688311..284633fab 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -1880,6 +1880,50 @@ pub const CAPI = struct {
+         return readTextLocked(surface, core_sel, result);
+     }
+
++    /// Read the live command from OSC 133 input cells. The terminal remains
++    /// authoritative for editing, cursor motion, history, completion and IME.
++    export fn ghostty_surface_read_prompt_input(
++        surface: *Surface,
++        result: *Text,
++    ) bool {
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.mutex.lock();
++        defer core_surface.renderer_state.mutex.unlock();
++
++        const screen = core_surface.renderer_state.terminal.screens.active;
++        if (screen.cursor.semantic_content != .input and
++            screen.cursor.page_cell.semantic_content != .input) return false;
++
++        const cursor_pin = screen.cursor.page_pin.*;
++        const cells = cursor_pin.cells(.all);
++        var first: ?usize = null;
++        var last: ?usize = null;
++        for (cells, 0..) |cell, x| {
++            if (cell.semantic_content != .input) continue;
++            if (first == null) first = x;
++            last = x;
++        }
++
++        if (first == null) {
++            const empty = global.alloc.dupeZ(u8, "") catch return false;
++            result.* = .{
++                .tl_px_x = -1,
++                .tl_px_y = -1,
++                .offset_start = 0,
++                .offset_len = 0,
++                .text = empty.ptr,
++                .text_len = 0,
++            };
++            return true;
++        }
++
++        var tl = cursor_pin;
++        var br = cursor_pin;
++        tl.x = @intCast(first.?);
++        br.x = @intCast(last.?);
++        return readTextLocked(surface, terminal.Selection.init(tl, br, false), result);
++    }
++
+     /// cmux fork: read clipboard-formatted plain text from inclusive absolute
+     /// screen rows without mutating the active selection.
+     export fn ghostty_surface_read_screen_clipboard_text(
+@@ -2099,6 +2143,13 @@ pub const CAPI = struct {
+
+     /// Read current scrollbar geometry and its absolute row-space identity
+     /// directly from the terminal, independent of renderer publication.
++    export fn ghostty_surface_is_alternate_screen(surface: *Surface) bool {
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.lockDemand();
++        defer core_surface.renderer_state.unlockDemand();
++        return core_surface.renderer_state.terminal.screens.active_key == .alternate;
++    }
++
+     export fn ghostty_surface_scrollbar(
+         surface: *Surface,
+         result: *SurfaceScrollbar,
+@@ -3104,6 +3155,18 @@ pub const CAPI = struct {
+         surface.core_surface.io.processOutput(ptr[0..len]);
+     }
+
++    /// Write already-encoded input bytes to the surface backend.
++    export fn ghostty_surface_write_input(
++        surface: *Surface,
++        ptr: [*]const u8,
++        len: usize,
++    ) void {
++        if (len == 0) return;
++        surface.core_surface.writeInput(ptr[0..len]) catch |err| {
++            log.err("error writing encoded surface input err={}", .{err});
++        };
++    }
++
+     /// Install a callback that fires on every PTY-output byte slice
+     /// before the VT parser sees it. Pass `cb = null` to clear.
+     ///
+@@ -3214,6 +3277,14 @@ pub const CAPI = struct {
+         height.* = pos.height;
+     }
+
++    /// Controls renderer cursor ownership without changing DEC mode 25.
++    export fn ghostty_surface_set_host_cursor_visible(
++        surface: *Surface,
++        visible: bool,
++    ) void {
++        surface.core_surface.setHostCursorVisible(visible);
++    }
++
+     /// Request that the surface become closed. This will go through the
+     /// normal trigger process that a close surface input binding would.
+     export fn ghostty_surface_request_close(ptr: *Surface) void {
+diff --git a/src/renderer/Thread.zig b/src/renderer/Thread.zig
+index 321284988..22e784d4d 100644
+--- a/src/renderer/Thread.zig
++++ b/src/renderer/Thread.zig
+@@ -774,6 +774,10 @@ fn drainMailbox(self: *Thread) !MailboxDrainResult {
+                 }
+             },
+
++            .host_cursor_visible => |visible| {
++                self.renderer.setHostCursorVisible(visible);
++            },
++
+             .font_grid => |grid| {
+                 self.renderer.setFontGrid(grid.grid);
+                 grid.set.deref(grid.old_key);
+diff --git a/src/renderer/generic.zig b/src/renderer/generic.zig
+index 1dfdd35c2..1a3bd8659 100644
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -258,6 +258,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+         /// The render state we update per loop.
+         terminal_state: terminal.RenderState = .empty,
+
++        /// Embedder-controlled cursor visibility. Native inline editors use
++        /// this to replace the grid caret without changing terminal modes.
++        host_cursor_visible: bool = true,
++
+         /// The number of frames since the last terminal state reset.
+         /// We reset the terminal state after ~100,000 frames (about 10 to
+         /// 15 minutes at 120Hz) to prevent wasted memory buildup from
+@@ -1296,6 +1300,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+                     self.alloc,
+                     state.terminal,
+                 );
++                self.terminal_state.cursor.visible =
++                    self.terminal_state.cursor.visible and self.host_cursor_visible;
+
+                 // If our terminal state is dirty at all we need to redo
+                 // the viewport search.
+@@ -2051,6 +2057,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
+             }
+         }
+
++        pub fn setHostCursorVisible(self: *Self, visible: bool) void {
++            if (self.host_cursor_visible == visible) return;
++            self.host_cursor_visible = visible;
++            self.terminal_state.dirty = .full;
++        }
++
+         /// Update only renderer colors for a manual-IO theme change.
+         pub fn changeColorConfig(self: *Self, config: *const configpkg.Config) void {
+             self.draw_mutex.lock();
+diff --git a/src/renderer/message.zig b/src/renderer/message.zig
+index 08306873a..585d07fbc 100644
+--- a/src/renderer/message.zig
++++ b/src/renderer/message.zig
+@@ -26,6 +26,11 @@ pub const Message = union(enum) {
+     /// restarting the timer.
+     reset_cursor_blink,
+
++    /// Whether the embedding application wants the terminal cursor rendered.
++    /// This is deliberately independent of DEC mode 25: native composers may
++    /// temporarily own text entry without mutating the child terminal state.
++    host_cursor_visible: bool,
++
+     /// Change the font grid. This can happen for any number of reasons
+     /// including a font size change, family change, etc.
+     font_grid: struct {

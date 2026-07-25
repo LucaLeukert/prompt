@@ -4,6 +4,7 @@
 DerivedData/
 build/
 Artifacts/
+Prompt.xcodeproj/
 *.xcresult
 xcuserdata/
 *.mov

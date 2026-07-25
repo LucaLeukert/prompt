@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          submodules: recursive
 
       - name: Install lint tools
         run: make lint-install
@@ -41,16 +43,22 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify source sync and patch
+      - name: Verify isolated Ghostty integration
         run: |
           make sync
           git diff --check
           git -C Vendor/ghostty diff --check
+          test -z "$(git -C Vendor/ghostty status --porcelain)"
+          test ! -e .build/ghostty/macos/Sources/Prompt
+          test ! -e .build/ghostty/macos/Sources/GhosttyAppKit
 
-      - name: Validate Xcode workspace metadata
+      - name: Validate project definition
         run: |
           python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          ET.parse("Prompt.xcworkspace/contents.xcworkspacedata")
-          ET.parse("Prompt.xcworkspace/xcshareddata/xcschemes/Prompt App.xcscheme")
+          from pathlib import Path
+
+          spec = Path("project.yml").read_text()
+          assert "name: Prompt" in spec
+          assert "Vendor/ghostty/macos/Sources/Prompt" not in spec
+          assert ".build/ghostty/macos/Sources" in spec
           PY

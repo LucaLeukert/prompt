@@ -1,0 +1,276 @@
+diff --git a/macos/Sources/Ghostty/Ghostty.App.swift b/macos/Sources/Ghostty/Ghostty.App.swift
+index c52961ce5..b836e27ea 100644
+--- a/macos/Sources/Ghostty/Ghostty.App.swift
++++ b/macos/Sources/Ghostty/Ghostty.App.swift
+@@ -7,9 +7,19 @@ protocol GhosttyAppDelegate: AnyObject {
+     /// Called when a callback needs access to a specific surface. This should return nil
+     /// when the surface is no longer valid.
+     func findSurface(forUUID uuid: UUID) -> Ghostty.SurfaceView?
++
++    /// Embedded hosts may manage their own application lifecycle. Returning false
++    /// prevents a terminal-generated quit action from terminating the host process.
++    func ghosttyShouldTerminateApplication() -> Bool
+     #endif
+ }
+
++#if os(macOS)
++extension GhosttyAppDelegate {
++    func ghosttyShouldTerminateApplication() -> Bool { true }
++}
++#endif
++
+ extension Ghostty {
+     // IMPORTANT: THIS IS NOT DONE.
+     // This is a refactor/redo of Ghostty.AppState so that it supports both macOS and iOS
+@@ -46,10 +56,10 @@ extension Ghostty {
+             return ghostty_app_needs_confirm_quit(app)
+         }
+
+-        init(configPath: String? = nil) {
++        init(configPath: String? = nil, configDefaults: String? = nil) {
+             self.configPath = configPath
+             // Initialize the global configuration.
+-            self.config = Config(at: configPath)
++            self.config = Config(at: configPath, defaults: configDefaults)
+             if self.config.config == nil {
+                 readiness = .error
+                 return
+@@ -493,7 +503,12 @@ extension Ghostty {
+             // Action dispatch
+             switch action.tag {
+             case GHOSTTY_ACTION_QUIT:
++                #if PROMPT
++                logger.info("terminal-generated quit action ignored by Prompt")
++                return false
++                #else
+                 quit(app)
++                #endif
+
+             case GHOSTTY_ACTION_NEW_WINDOW:
+                 newWindow(app, target: target)
+@@ -695,6 +710,13 @@ extension Ghostty {
+             #endif
+
+             #if os(macOS)
++            if let userdata = ghostty_app_userdata(app) {
++                let state = Unmanaged<App>.fromOpaque(userdata).takeUnretainedValue()
++                guard state.delegate?.ghosttyShouldTerminateApplication() ?? true else {
++                    logger.info("quit request ignored by embedded application delegate")
++                    return
++                }
++            }
+             // We want to quit, start that process
+             NSApplication.shared.terminate(nil)
+             #endif
+@@ -1451,6 +1473,9 @@ extension Ghostty {
+             case GHOSTTY_TARGET_SURFACE:
+                 guard let surface = target.target.surface else { return }
+                 guard let surfaceView = self.surfaceView(from: surface) else { return }
++                MainActor.assumeIsolated {
++                    GhosttyAppKitHooks.commandDidFinish?(surfaceView, Int(v.exit_code), v.duration)
++                }
+
+                 // Determine if we even care about command finish notifications
+                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
+@@ -1671,6 +1696,9 @@ extension Ghostty {
+             case GHOSTTY_TARGET_SURFACE:
+                 guard let surface = target.target.surface else { return false }
+                 guard let surfaceView = self.surfaceView(from: surface) else { return false }
++                if MainActor.assumeIsolated({
++                    GhosttyAppKitHooks.childDidExit?(surfaceView, Int(v.exit_code))
++                }) == true { return true }
+                 // We handle this when the window is visible and timetime_ms is greater than 0,
+                 // which will rule out exit codes on launch
+                 guard surfaceView.window != nil, v.timetime_ms > 0 else { return false }
+diff --git a/macos/Sources/Ghostty/Ghostty.Config.swift b/macos/Sources/Ghostty/Ghostty.Config.swift
+index d7134029d..a0c47f893 100644
+--- a/macos/Sources/Ghostty/Ghostty.Config.swift
++++ b/macos/Sources/Ghostty/Ghostty.Config.swift
+@@ -37,8 +37,8 @@ extension Ghostty {
+             self.config = config
+         }
+
+-        convenience init(at path: String? = nil, finalize: Bool = true) {
+-            self.init(config: Self.loadConfig(at: path, finalize: finalize))
++        convenience init(at path: String? = nil, defaults: String? = nil, finalize: Bool = true) {
++            self.init(config: Self.loadConfig(at: path, defaults: defaults, finalize: finalize))
+         }
+
+         convenience init(clone config: ghostty_config_t) {
+@@ -57,7 +57,7 @@ extension Ghostty {
+         /// - Parameters:
+         ///   - path: An optional preferred config file path. Pass `nil` to load the default configuration files.
+         ///   - finalize: Whether to finalize the configuration to populate default values.
+-        static func loadConfig(at path: String?, finalize: Bool) -> ghostty_config_t? {
++        static func loadConfig(at path: String?, defaults: String? = nil, finalize: Bool) -> ghostty_config_t? {
+             // Initialize the global configuration.
+             guard let cfg = ghostty_config_new() else {
+                 logger.critical("ghostty_config_new failed")
+@@ -81,6 +81,12 @@ extension Ghostty {
+             }
+
+             ghostty_config_load_recursive_files(cfg)
++
++            if let defaults {
++                defaults.withCString {
++                    ghostty_config_load_string(cfg, $0, UInt(defaults.utf8.count), "/embedder/defaults")
++                }
++            }
+ #endif
+
+             // TODO: we'd probably do some config loading here... for now we'd
+diff --git a/macos/Sources/Ghostty/Surface View/SurfaceView.swift b/macos/Sources/Ghostty/Surface View/SurfaceView.swift
+index f6b30a7ad..b964d0a53 100644
+--- a/macos/Sources/Ghostty/Surface View/SurfaceView.swift
++++ b/macos/Sources/Ghostty/Surface View/SurfaceView.swift
+@@ -3,6 +3,24 @@ import UserNotifications
+ import GhosttyKit
+ import System
+
++@_cdecl("ghostty_swift_manual_io_write")
++private func ghosttySwiftManualIOWrite(
++    _ userdata: UnsafeMutableRawPointer?,
++    _ bytes: UnsafePointer<CChar>?,
++    _ count: UInt
++) {
++    guard let userdata, let bytes, count > 0 else { return }
++    // AppKit delivers keyboard, mouse, and IME input on the main thread. A
++    // manual terminal may also emit protocol replies while parsing output
++    // (for example, device-attribute responses) on its terminal thread. Those
++    // replies already came from the authoritative terminal and must not be
++    // sent through the remote PTY a second time.
++    guard Thread.isMainThread else { return }
++    let data = Data(bytes: bytes, count: Int(count))
++    let view = Unmanaged<Ghostty.SurfaceView>.fromOpaque(userdata).takeUnretainedValue()
++    MainActor.assumeIsolated { view.manualIOWriteHandler?(data) }
++}
++
+ extension Ghostty {
+     /// Render a terminal for the active app in the environment.
+     struct Terminal: View {
+@@ -207,7 +225,25 @@ extension Ghostty {
+                 // This is disabled except on macOS because it uses AppKit drag/drop APIs.
+                 SurfaceGrabHandle(surfaceView: surfaceView)
+                 #endif
++
++                #if os(macOS)
++                if let overlay = GhosttyAppKitHooks.overlay?(surfaceView) {
++                    overlay
++                }
++                #endif
++            }
++            #if os(macOS)
++            .safeAreaInset(edge: .top, spacing: 0) {
++                if let topBar = GhosttyAppKitHooks.topBar?(surfaceView) {
++                    topBar
++                }
++            }
++            .safeAreaInset(edge: .bottom, spacing: 0) {
++                if let bottomBar = GhosttyAppKitHooks.bottomBar?(surfaceView) {
++                    bottomBar
++                }
+             }
++            #endif
+         }
+     }
+
+@@ -653,6 +689,11 @@ extension Ghostty {
+         /// Context for surface creation
+         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
+
++        /// Manual surfaces use Ghostty for VT state, rendering and input
++        /// encoding while an embedder owns the actual transport.
++        var ioMode: ghostty_surface_io_mode_e = GHOSTTY_SURFACE_IO_EXEC
++        var ioWriteHandler: ((Data) -> Void)?
++
+         init() {}
+
+         init(from config: ghostty_surface_config_s) {
+@@ -675,6 +716,7 @@ extension Ghostty {
+                 }
+             }
+             self.context = config.context
++            self.ioMode = config.io_mode
+         }
+
+         /// Provides a C-compatible ghostty configuration within a closure. The configuration
+@@ -711,6 +753,14 @@ extension Ghostty {
+             // Set context
+             config.context = context
+
++            // Set up embedder-owned IO. The SurfaceView owns the callback and
++            // is also Ghostty's stable userdata for the complete surface life.
++            config.io_mode = ioMode
++            if ioMode == GHOSTTY_SURFACE_IO_MANUAL {
++                config.io_write_cb = ghosttySwiftManualIOWrite
++                config.io_write_userdata = Unmanaged.passUnretained(view).toOpaque()
++            }
++
+             // Use withCString to ensure strings remain valid for the duration of the closure
+             return try workingDirectory.withCString { cWorkingDir in
+                 config.working_directory = cWorkingDir
+diff --git a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
+index 4fb156317..dacefef27 100644
+--- a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
++++ b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
+@@ -191,6 +191,10 @@ extension Ghostty {
+         // This is set to non-null during keyDown to accumulate insertText contents
+         private var keyTextAccumulator: [String]?
+
++        /// Receives input bytes encoded by a manual-IO surface. Prompt uses
++        /// this to forward presentation-surface input to an authoritative PTY.
++        var manualIOWriteHandler: ((Data) -> Void)?
++
+         // True when we've consumed a left mouse-down only to move focus and
+         // should suppress the matching mouse-up from being reported.
+         private var suppressNextLeftMouseUp: Bool = false
+@@ -239,6 +243,7 @@ extension Ghostty {
+             // is non-zero so that our layer bounds are non-zero so that our renderer
+             // can do SOMETHING.
+             super.init(id: uuid, frame: NSRect(x: 0, y: 0, width: 800, height: 600))
++            self.manualIOWriteHandler = baseConfig?.ioWriteHandler
+
+             // Our cache of screen data
+             cachedScreenContents = .init(duration: .milliseconds(500)) { [weak self] in
+@@ -388,6 +393,10 @@ extension Ghostty {
+         }
+
+         deinit {
++            MainActor.assumeIsolated {
++                GhosttyAppKitHooks.surfaceDidClose?(self)
++            }
++
+             // Remove all of our notificationcenter subscriptions
+             let center = NotificationCenter.default
+             center.removeObserver(self)
+@@ -901,6 +910,11 @@ extension Ghostty {
+
+             // Release pressure
+             ghostty_surface_mouse_pressure(surface, 0, 0)
++
++            // Give an embedding host a chance to reclaim keyboard focus after
++            // the complete mouse gesture. Selection and application mouse
++            // reporting still reach the terminal first.
++            GhosttyAppKitHooks.surfaceDidClick?(self)
+         }
+
+         override func otherMouseDown(with event: NSEvent) {
+@@ -1081,6 +1095,10 @@ extension Ghostty {
+                 return
+             }
+
++            if GhosttyAppKitHooks.keyDown?(self, event, markedText.length > 0) == true {
++                return
++            }
++
+             // On any keyDown event we unset our bell state
+             bell = false
+
+@@ -1724,6 +1742,7 @@ extension Ghostty {
+
+         @objc func resetTerminal(_ sender: Any) {
+             guard let surface = self.surface else { return }
++            GhosttyAppKitHooks.terminalDidReset?(self)
+             let action = "reset"
+             if !ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8))) {
+                 AppDelegate.logger.warning("action failed action=\(action, privacy: .public)")
