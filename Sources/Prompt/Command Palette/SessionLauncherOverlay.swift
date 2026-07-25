@@ -48,7 +48,7 @@ struct PromptCommandPaletteView: View {
                 subtitle: "Repositories and registered worktrees",
                 description: "Browse Git locations, or press Command-K to create a worktree",
                 leadingIcon: "arrow.triangle.branch",
-                folderPicker: PromptSessionLauncher.gitFolderPicker(store: store, at: directory),
+                gitPicker: PromptSessionLauncher.gitPicker(store: store, at: directory),
                 primaryActionTitle: "Browse Git repositories",
                 contextualActions: {
                     PromptSessionLauncher.gitActions(store: store, directory: directory)
@@ -240,47 +240,43 @@ struct PromptRemoteSession: Codable, Hashable {
         store.createLocal(directory: root, title: URL(fileURLWithPath: root).lastPathComponent, behavior: .project)
     }
 
-    static func gitFolderPicker(store: PromptWorkspaceStore, at path: String) -> PromptFolderPickerConfiguration {
+    static func gitPicker(store: PromptWorkspaceStore, at path: String) -> PromptGitPickerConfiguration {
         let current = URL(fileURLWithPath: path).standardizedFileURL.path
-        let root = PromptLocalSessionLauncher.gitRoot(containing: current)
-        let initial = root.map { URL(fileURLWithPath: $0).deletingLastPathComponent().path } ?? current
+        let searchDirectory = PromptLocalSessionLauncher.gitRoot(containing: current)
+            .map { URL(fileURLWithPath: $0).deletingLastPathComponent().path } ?? NSHomeDirectory()
         let cached = cachedGitLocations()
         let seeds = Array(Set(
             store.workspace.sessions.compactMap(\.configuration.configuredDirectory)
                 + [current]))
-        return PromptFolderPickerConfiguration(
-            initialDirectory: initial,
-            displayName: { $0.promptDisplayPath },
-            directories: { directory in
+        return PromptGitPickerConfiguration(
+            cachedLocations: gitPickerEntries(cached),
+            locations: {
                 let locations = await Task.detached {
                     PromptLocalSessionLauncher.gitLocations(
-                        searching: directory,
+                        searching: searchDirectory,
                         seeds: seeds,
                         cached: cached)
                 }.value
                 rememberGitLocations(locations)
-                return locations.map { location in
-                    let repository = URL(fileURLWithPath: location.repository).lastPathComponent
-                    let worktreeName = URL(fileURLWithPath: location.path).lastPathComponent
-                    let name = location.isMainWorktree ? repository : "\(repository) · \(location.branch ?? worktreeName)"
-                    let detail = [
-                        location.isMainWorktree ? "repository" : "worktree",
-                        location.branch.map { "git:\($0)" },
-                        location.path.promptDisplayPath,
-                    ].compactMap { $0 }.joined(separator: "  ·  ")
-                    return PromptFolderPickerEntry(
-                        name: name,
-                        path: location.path,
-                        subtitle: detail,
-                        icon: location.isMainWorktree ? "folder.badge.gearshape" : "arrow.triangle.branch")
-                }
+                return gitPickerEntries(locations)
             },
             onSelect: { openGitLocation($0, store: store) },
-            onReveal: { NSWorkspace.shared.open(URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath)) },
-            sectionTitle: "Git repositories & worktrees",
-            actionTitle: "Open",
-            emptyText: "No Git repositories found in this location",
-            selectsEntries: true)
+            emptyText: "No Git repositories found")
+    }
+
+    private static func gitPickerEntries(
+        _ locations: [PromptLocalSessionLauncher.GitLocation]
+    ) -> [PromptGitPickerEntry] {
+        locations.map { location in
+            PromptGitPickerEntry(
+                name: location.isMainWorktree
+                    ? URL(fileURLWithPath: location.repository).lastPathComponent
+                    : URL(fileURLWithPath: location.path).lastPathComponent,
+                path: location.path,
+                repository: location.repository,
+                branch: location.branch,
+                isMainWorktree: location.isMainWorktree)
+        }
     }
 
     static func openGitLocation(_ path: String, store: PromptWorkspaceStore) {

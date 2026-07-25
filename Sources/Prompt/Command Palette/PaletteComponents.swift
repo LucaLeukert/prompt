@@ -58,6 +58,7 @@ enum PromptCommandBehavior {
     case perform(() -> Void)
     case submenu(() -> [PromptCommandOption])
     case folder(PromptFolderPickerConfiguration)
+    case git(PromptGitPickerConfiguration)
     case sidebar(PromptWorkspaceStore)
 }
 
@@ -173,6 +174,31 @@ struct PromptCommandOption: Identifiable, Hashable {
         self.primaryActionTitle = primaryActionTitle ?? "Browse \(title)"
     }
 
+    init(
+        title: String,
+        section: String = "Commands",
+        subtitle: String? = nil,
+        description: String? = nil,
+        leadingIcon: String = "arrow.triangle.branch",
+        gitPicker: PromptGitPickerConfiguration,
+        primaryActionTitle: String? = nil,
+        contextualActions: (() -> [PromptCommandAction])? = nil
+    ) {
+        self.title = title
+        self.section = section
+        self.subtitle = subtitle
+        self.description = description
+        self.symbols = nil
+        self.leadingIcon = leadingIcon
+        self.leadingColor = nil
+        self.badge = nil
+        self.emphasis = false
+        self.sortKey = nil
+        self.behavior = .git(gitPicker)
+        self.contextualActions = contextualActions
+        self.primaryActionTitle = primaryActionTitle ?? "Browse \(title)"
+    }
+
     init(title: String, section: String = "Commands", subtitle: String? = nil, description: String? = nil, leadingIcon: String = "sidebar.left", sidebarEditor: PromptWorkspaceStore, contextualActions: (() -> [PromptCommandAction])? = nil) {
         self.title = title
         self.section = section
@@ -200,7 +226,7 @@ struct PromptCommandOption: Identifiable, Hashable {
     var opensRoute: Bool {
         switch behavior {
         case .perform: false
-        case .submenu, .folder, .sidebar: true
+        case .submenu, .folder, .git, .sidebar: true
         }
     }
 }
@@ -208,6 +234,7 @@ struct PromptCommandOption: Identifiable, Hashable {
 enum PromptPaletteRoute {
     case commands(title: String, options: [PromptCommandOption])
     case folder(PromptFolderPickerConfiguration)
+    case git(PromptGitPickerConfiguration)
     case sidebar(PromptWorkspaceStore)
 }
 
@@ -374,6 +401,12 @@ struct PromptCommandPaletteContentView: View {
                     isPresented: $isPresented,
                     keyboard: keyboard,
                     onBack: leaveFolderPicker)
+            } else if case .some(.git(let gitPicker)) = navigation.current {
+                GitPickerView(
+                    configuration: gitPicker,
+                    isPresented: $isPresented,
+                    keyboard: keyboard,
+                    onBack: leaveFolderPicker)
             } else {
                 ZStack(alignment: .bottomTrailing) {
                     VStack(alignment: .leading, spacing: 0) {
@@ -484,6 +517,8 @@ struct PromptCommandPaletteContentView: View {
         switch option.behavior {
         case .folder(let picker):
             navigation.push(.folder(picker))
+        case .git(let picker):
+            navigation.push(.git(picker))
         case .sidebar(let editor):
             navigation.push(.sidebar(editor))
         case .submenu(let children):
@@ -802,6 +837,22 @@ struct PromptFolderPickerConfiguration {
     var selectsEntries = false
 }
 
+struct PromptGitPickerEntry: Identifiable, Hashable {
+    var id: String { path }
+    let name: String
+    let path: String
+    let repository: String
+    let branch: String?
+    let isMainWorktree: Bool
+}
+
+struct PromptGitPickerConfiguration {
+    let cachedLocations: [PromptGitPickerEntry]
+    let locations: () async throws -> [PromptGitPickerEntry]
+    let onSelect: (String) -> Void
+    var emptyText = "No Git repositories found"
+}
+
 enum PromptFolderPath {
     struct BrowsingContext: Equatable {
         let directory: String
@@ -840,6 +891,335 @@ enum PromptFolderPath {
             directory: parent,
             query: url.lastPathComponent,
             exists: false)
+    }
+}
+
+private struct GitPickerView: View {
+    private struct Group: Identifiable {
+        var id: String { repository.path }
+        let repository: PromptGitPickerEntry
+        let worktrees: [PromptGitPickerEntry]
+    }
+
+    let configuration: PromptGitPickerConfiguration
+    @Binding var isPresented: Bool
+    let keyboard: PromptPaletteKeyboardRouter
+    let onBack: () -> Void
+
+    @State private var query = ""
+    @State private var entries: [PromptGitPickerEntry]
+    @State private var selectedIndex = 0
+    @State private var isLoading = true
+    @State private var loadError: String?
+    @State private var keyboardOwner = UUID()
+    @State private var pointerLocationAtSelection: CGPoint?
+
+    init(
+        configuration: PromptGitPickerConfiguration,
+        isPresented: Binding<Bool>,
+        keyboard: PromptPaletteKeyboardRouter,
+        onBack: @escaping () -> Void
+    ) {
+        self.configuration = configuration
+        _isPresented = isPresented
+        self.keyboard = keyboard
+        self.onBack = onBack
+        _entries = State(initialValue: configuration.cachedLocations)
+        _isLoading = State(initialValue: configuration.cachedLocations.isEmpty)
+    }
+
+    private var visibleGroups: [Group] {
+        let grouped = Dictionary(grouping: entries, by: \.repository)
+        return grouped.keys.sorted {
+            URL(fileURLWithPath: $0).lastPathComponent.localizedStandardCompare(
+                URL(fileURLWithPath: $1).lastPathComponent) == .orderedAscending
+        }.compactMap { repository in
+            let values = grouped[repository, default: []]
+            guard let main = values.first(where: \.isMainWorktree) else { return nil }
+            let worktrees = values.filter { !$0.isMainWorktree }.sorted {
+                ($0.branch ?? $0.name).localizedStandardCompare($1.branch ?? $1.name) == .orderedAscending
+            }
+            guard !query.isEmpty else { return Group(repository: main, worktrees: worktrees) }
+            let repositoryMatches = matches(
+                [URL(fileURLWithPath: repository).lastPathComponent, repository],
+                query: query)
+            let matchingWorktrees = worktrees.filter {
+                matches([$0.name, $0.branch, $0.path].compactMap { $0 }, query: query)
+            }
+            guard repositoryMatches || !matchingWorktrees.isEmpty else { return nil }
+            return Group(
+                repository: main,
+                worktrees: repositoryMatches ? worktrees : matchingWorktrees)
+        }
+    }
+
+    private var visibleEntries: [PromptGitPickerEntry] {
+        visibleGroups.flatMap { [$0.repository] + $0.worktrees }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            CommandPaletteQuery(
+                query: $query,
+                title: "Git repositories",
+                canGoBack: true,
+                onBack: leavePicker)
+                .onChange(of: query) { _ in selectedIndex = 0 }
+
+            Divider().opacity(0.55)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        Text("GIT REPOSITORIES")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .tracking(0.7)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 4)
+                            .padding(.bottom, 4)
+
+                        ForEach(visibleGroups) { group in
+                            VStack(alignment: .leading, spacing: 2) {
+                                gitRow(group.repository)
+                                ForEach(group.worktrees) { worktree in
+                                    gitRow(worktree)
+                                }
+                            }
+                            .background(alignment: .topLeading) {
+                                if !group.worktrees.isEmpty {
+                                    GitTreeConnector(childCount: group.worktrees.count)
+                                }
+                            }
+                        }
+
+                        if isLoading, entries.isEmpty {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Finding repositories…").foregroundStyle(.secondary)
+                            }
+                            .padding(18)
+                        } else if let loadError, entries.isEmpty {
+                            Text(loadError).font(.caption).foregroundStyle(.secondary).padding(18)
+                        } else if visibleEntries.isEmpty {
+                            Text(query.isEmpty ? configuration.emptyText : "No matching repositories or worktrees")
+                                .foregroundStyle(.secondary)
+                                .padding(18)
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(height: 420)
+                .onChange(of: selectedIndex) { index in
+                    guard visibleEntries.indices.contains(index) else { return }
+                    proxy.scrollTo(visibleEntries[index].id)
+                }
+            }
+
+            Divider().opacity(0.55)
+            HStack(spacing: 16) {
+                PaletteHint(keys: ["↑", "↓"], label: "Navigate")
+                Spacer()
+                Button(action: openSelected) {
+                    PaletteLabelFirstHint(label: "Open", systemKeys: ["return"])
+                }
+                .promptGlassButtonStyle()
+                .disabled(visibleEntries.isEmpty)
+            }
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 18)
+            .frame(height: 48)
+        }
+        .task { await load() }
+        .onAppear {
+            pointerLocationAtSelection = NSEvent.mouseLocation
+            claimKeyboard()
+        }
+        .onDisappear { keyboard.release(owner: keyboardOwner) }
+    }
+
+    private func matches(_ values: [String], query: String) -> Bool {
+        values.contains { $0.promptMatchedIndices(for: query) != nil }
+    }
+
+    private func activate(_ entry: PromptGitPickerEntry) {
+        isPresented = false
+        configuration.onSelect(entry.path)
+    }
+
+    private func openSelected() {
+        guard visibleEntries.indices.contains(selectedIndex) else { return }
+        activate(visibleEntries[selectedIndex])
+    }
+
+    private func leavePicker() {
+        keyboard.release(owner: keyboardOwner)
+        onBack()
+    }
+
+    private func moveSelection(_ delta: Int) {
+        let count = visibleEntries.count
+        guard count > 0 else { return }
+        pointerLocationAtSelection = NSEvent.mouseLocation
+        selectedIndex = (selectedIndex + delta + count) % count
+    }
+
+    private func gitRow(_ entry: PromptGitPickerEntry) -> some View {
+        let index = visibleEntries.firstIndex(of: entry) ?? 0
+        return GitPickerRow(entry: entry, selected: selectedIndex == index) {
+            activate(entry)
+        }
+        .onContinuousHover { phase in
+            guard case .active = phase else { return }
+            let location = NSEvent.mouseLocation
+            guard PromptPalettePointerPolicy.hasMoved(
+                from: pointerLocationAtSelection,
+                to: location
+            ) else { return }
+            pointerLocationAtSelection = location
+            selectedIndex = index
+        }
+        .id(entry.id)
+    }
+
+    private func claimKeyboard() {
+        keyboard.claim(owner: keyboardOwner) { command in
+            switch command {
+            case .moveUp: moveSelection(-1)
+            case .moveDown: moveSelection(1)
+            case .submit: openSelected()
+            case .back: leavePicker()
+            case .delete, .actions, .textInput: return false
+            }
+            return true
+        }
+    }
+
+    private func load() async {
+        isLoading = entries.isEmpty
+        loadError = nil
+        do {
+            let refreshed = try await configuration.locations()
+            if !refreshed.isEmpty {
+                let selectedPath = visibleEntries.indices.contains(selectedIndex)
+                    ? visibleEntries[selectedIndex].path
+                    : nil
+                let previousIndex = selectedIndex
+                entries = refreshed
+                if let selectedPath,
+                   let refreshedIndex = visibleEntries.firstIndex(where: { $0.path == selectedPath }) {
+                    selectedIndex = refreshedIndex
+                } else {
+                    selectedIndex = min(previousIndex, max(visibleEntries.count - 1, 0))
+                }
+            }
+        } catch {
+            loadError = error.localizedDescription
+        }
+        isLoading = false
+    }
+}
+
+private struct GitPickerRow: View {
+    let entry: PromptGitPickerEntry
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .trailing) {
+                HStack(spacing: 0) {
+                    if !entry.isMainWorktree {
+                        Color.clear
+                            .frame(width: 48)
+                    }
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.secondary.opacity(0.10))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: entry.isMainWorktree ? "folder.badge.gearshape" : "arrow.triangle.branch")
+                                .foregroundStyle(.secondary)
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.isMainWorktree ? entry.name : (entry.branch ?? entry.name))
+                                .font(.body)
+                                .lineLimit(1)
+                            Text(entry.path.promptDisplayPath)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer()
+                    }
+                    .padding(.leading, 10)
+                    .padding(.trailing, 38)
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                    .background(
+                        selected ? Color.primary.opacity(0.055) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(alignment: .leading) {
+                        if !entry.isMainWorktree {
+                            Rectangle()
+                                .fill(Color.secondary.opacity(0.38))
+                                .frame(width: selected ? 13 : 10, height: 1)
+                                .offset(x: selected ? -3 : 0)
+                        }
+                    }
+                    .scaleEffect(selected ? 1.012 : 1, anchor: .leading)
+                    .offset(x: selected ? 3 : 0)
+                    .animation(.spring(response: 0.18, dampingFraction: 0.72), value: selected)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+                .contentShape(Rectangle())
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 28, height: 34)
+                    .padding(.trailing, 8)
+                    .opacity(selected ? 1 : 0)
+                    .allowsHitTesting(false)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct GitTreeConnector: View {
+    let childCount: Int
+
+    var body: some View {
+        Canvas { context, size in
+            // Rows are 50 points tall with two points between them. The spine
+            // is centered exactly beneath the repository's 34-point icon.
+            let rowHeight: CGFloat = 50
+            let rowSpacing: CGFloat = 2
+            let stride = rowHeight + rowSpacing
+            let spineX: CGFloat = 27
+            let parentCenterY = rowHeight / 2
+            let iconRadius: CGFloat = 17
+            let parentBackdropBottomY = parentCenterY + iconRadius
+            let childSurfaceLeftX: CGFloat = 48
+            let lastChildCenterY = parentCenterY + CGFloat(childCount) * stride
+            var path = Path()
+            path.move(to: CGPoint(x: spineX, y: parentBackdropBottomY))
+            path.addLine(to: CGPoint(x: spineX, y: lastChildCenterY))
+            for child in 1 ... childCount {
+                let childCenterY = parentCenterY + CGFloat(child) * stride
+                path.move(to: CGPoint(x: spineX, y: childCenterY))
+                path.addLine(to: CGPoint(x: childSurfaceLeftX, y: childCenterY))
+            }
+            context.stroke(
+                path,
+                with: .color(Color.secondary.opacity(0.38)),
+                style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round))
+        }
+        .frame(width: 76)
+        .allowsHitTesting(false)
     }
 }
 
@@ -1607,6 +1987,31 @@ private struct PaletteHint: View {
                     .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
             }
             Text(label).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct PaletteLabelFirstHint: View {
+    let label: String
+    var keys: [String] = []
+    var systemKeys: [String] = []
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(label).foregroundStyle(.secondary)
+            ForEach(keys, id: \.self) { key in
+                Text(key)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 5)
+                    .frame(minWidth: 22, minHeight: 22)
+                    .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
+            }
+            ForEach(systemKeys, id: \.self) { key in
+                Image(systemName: key)
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
+            }
         }
     }
 }
