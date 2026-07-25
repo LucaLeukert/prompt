@@ -114,9 +114,7 @@ struct PromptRemoteSession: Codable, Hashable {
     private static var tailnetCache: (date: Date, hosts: [String])?
 
     static var savedRemoteSessions: [PromptRemoteSession] {
-        guard let data = UserDefaults.standard.data(forKey: savedKey),
-              let value = try? JSONDecoder().decode([PromptRemoteSession].self, from: data) else { return [] }
-        return value
+        PromptSettings.shared.value(forKey: savedKey) ?? []
     }
 
     static func refreshTailnetDiscovery() {
@@ -243,7 +241,7 @@ struct PromptRemoteSession: Codable, Hashable {
         if let cache = tailnetCache, Date().timeIntervalSince(cache.date) < 30 {
             return cache.hosts
         }
-        let lastSuccessfulHosts = UserDefaults.standard.stringArray(forKey: tailnetSavedKey) ?? []
+        let lastSuccessfulHosts: [String] = PromptSettings.shared.value(forKey: tailnetSavedKey) ?? []
         guard let executable = tailscaleExecutable else {
             logger.error("Tailscale executable was not found")
             return lastSuccessfulHosts
@@ -275,7 +273,7 @@ struct PromptRemoteSession: Codable, Hashable {
                 continue
             }
             tailnetCache = (Date(), hosts)
-            UserDefaults.standard.set(hosts, forKey: tailnetSavedKey)
+            PromptSettings.shared.set(hosts, forKey: tailnetSavedKey)
             logger.info("Tailscale status returned \(data.count) bytes and \(hosts.count) SSH candidates: \(hosts.joined(separator: ","), privacy: .public)")
             return hosts
         }
@@ -343,7 +341,7 @@ struct PromptRemoteSession: Codable, Hashable {
     private static func remember(_ descriptor: PromptRemoteSession) {
         var values = savedRemoteSessions.filter { $0.destination != descriptor.destination || $0.session != descriptor.session }
         values.insert(descriptor, at: 0)
-        if let data = try? JSONEncoder().encode(Array(values.prefix(12))) { UserDefaults.standard.set(data, forKey: savedKey) }
+        PromptSettings.shared.set(Array(values.prefix(12)), forKey: savedKey)
     }
 
     private static func remoteDirectories(host: String, at directory: String) async throws -> [PromptFolderPickerEntry] {

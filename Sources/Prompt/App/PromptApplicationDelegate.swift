@@ -127,8 +127,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func restoreOrCreateWorkspace() {
         var restoredWindowFrame: String?
-        if let data = UserDefaults.standard.data(forKey: "PromptRestorationState"),
-           let state = try? JSONDecoder().decode(PromptRestorationState.self, from: data),
+        if let state: PromptRestorationState = PromptSettings.shared.value(forKey: "PromptRestorationState"),
            var restored = state.workspaces.first {
             restoredWindowFrame = state.windowFrame
             for index in restored.sessions.indices {
@@ -157,9 +156,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
             workspaces: [workspaceStore.workspace],
             selectedWorkspaceID: workspaceStore.workspace.id,
             windowFrame: windowController?.window.map { NSStringFromRect($0.frame) })
-        if let data = try? JSONEncoder().encode(state) {
-            UserDefaults.standard.set(data, forKey: "PromptRestorationState")
-        }
+        PromptSettings.shared.set(state, forKey: "PromptRestorationState")
     }
 
     private func installMainMenu() {

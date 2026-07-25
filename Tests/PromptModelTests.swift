@@ -83,6 +83,41 @@ final class PromptModelTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(PromptRestorationState.self, from: JSONEncoder().encode(state)), state)
     }
 
+    func testPromptPathsKeepConfigurationAndCacheUnderPromptHome() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let paths = PromptPaths(homeDirectory: home)
+
+        try paths.prepare()
+
+        XCTAssertEqual(paths.settings.path, home.appendingPathComponent(".prompt/config.json").path)
+        XCTAssertEqual(paths.cacheFile("example.cache").path, home.appendingPathComponent(".prompt/cache/example.cache").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.cache.path))
+        try? FileManager.default.removeItem(at: home)
+    }
+
+    func testPromptSettingsRoundTripsValuesAndMigratesLegacyDefaults() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let suite = "PromptModelTests.Settings.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: home)
+        }
+        defaults.set(["legacy"], forKey: "hosts")
+        let paths = PromptPaths(homeDirectory: home)
+        let settings = PromptSettings(paths: paths, legacyDefaults: defaults)
+
+        let hosts: [String]? = settings.value(forKey: "hosts")
+        settings.set(["enabled": true], forKey: "features")
+        let reloaded = PromptSettings(paths: paths, legacyDefaults: nil)
+        let features: [String: Bool]? = reloaded.value(forKey: "features")
+
+        XCTAssertEqual(hosts, ["legacy"])
+        XCTAssertNil(defaults.object(forKey: "hosts"))
+        XCTAssertEqual(features, ["enabled": true])
+        XCTAssertNotNil(try JSONSerialization.jsonObject(with: Data(contentsOf: paths.settings)))
+    }
+
     func testRemoteConfigurationRoundTrip() throws {
         let remote = PromptRemoteSessionConfiguration(destination: "host", workingDirectory: "/srv/app", persistentSessionName: "prompt", attachOnly: true)
         let value = PromptSessionConfiguration.remote(remote)
