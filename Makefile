@@ -52,9 +52,21 @@ sync:
 	cp -R "$(ROOT)/Resources/Prompt.icon" "$(GHOSTTY)/images/Prompt.icon"; \
 	cp "$(ROOT)/Sources/Prompt.xcscheme" \
 		"$(GHOSTTY)/macos/Ghostty.xcodeproj/xcshareddata/xcschemes/Prompt.xcscheme"; \
-	if ! git -C "$(GHOSTTY)" apply --reverse --check \
-		"$(ROOT)/Patches/ghostty/0001-prompt-integration.patch" 2>/dev/null; then \
-		git -C "$(GHOSTTY)" apply "$(ROOT)/Patches/ghostty/0001-prompt-integration.patch"; \
+	patch="$(ROOT)/Patches/ghostty/0001-prompt-integration.patch"; \
+	applied_patch="$$(git -C "$(GHOSTTY)" rev-parse --git-path prompt-applied.patch)"; \
+	if git -C "$(GHOSTTY)" apply --reverse --check "$$patch" 2>/dev/null; then \
+		cp "$$patch" "$$applied_patch"; \
+	else \
+		if [ -f "$$applied_patch" ]; then \
+			if ! git -C "$(GHOSTTY)" apply --reverse --check "$$applied_patch"; then \
+				echo "Ghostty contains changes that conflict with the previously applied Prompt patch." >&2; \
+				echo "Resolve or discard those changes before running make sync again." >&2; \
+				exit 1; \
+			fi; \
+			git -C "$(GHOSTTY)" apply --reverse "$$applied_patch"; \
+		fi; \
+		git -C "$(GHOSTTY)" apply "$$patch"; \
+		cp "$$patch" "$$applied_patch"; \
 	fi
 
 prepare: sync
