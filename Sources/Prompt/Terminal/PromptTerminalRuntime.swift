@@ -6,14 +6,14 @@ import Darwin
 /// terminal sessions. Values are deliberately absent unless an experiment is
 /// explicitly enabled, so every flag defaults to `false`.
 enum PromptExperimentalFeatures {
-    static let remoteAIEnabledDefaultsKey = "PromptExperimentalRemoteAIEnabled"
+    static let remoteAIEnabledSettingKey = "PromptExperimentalRemoteAIEnabled"
 
     static var remoteAIEnabled: Bool {
-        PromptSettings.shared.value(forKey: remoteAIEnabledDefaultsKey) ?? false
+        remoteAIEnabled(in: .shared)
     }
 
-    static func remoteAIEnabled(in defaults: UserDefaults) -> Bool {
-        defaults.object(forKey: remoteAIEnabledDefaultsKey) as? Bool ?? false
+    static func remoteAIEnabled(in settings: PromptSettings) -> Bool {
+        settings.value(forKey: remoteAIEnabledSettingKey) ?? false
     }
 }
 

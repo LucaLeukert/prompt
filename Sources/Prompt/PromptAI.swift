@@ -2089,12 +2089,12 @@ final class PromptModel: ObservableObject {
 @MainActor
 final class PromptAutocompleteModel: ObservableObject {
     static let shared = PromptAutocompleteModel()
-    private static let completeAIInputDefaultsKey = "PromptCopilotCompletesAIInput"
+    private static let completeAIInputSettingKey = "PromptCopilotCompletesAIInput"
 
     @Published private var suggestions: [ObjectIdentifier: [String]] = [:]
     @Published private var selectedIndices: [ObjectIdentifier: Int] = [:]
     @Published var completesAIInput: Bool {
-        didSet { PromptSettings.shared.set(completesAIInput, forKey: Self.completeAIInputDefaultsKey) }
+        didSet { PromptSettings.shared.set(completesAIInput, forKey: Self.completeAIInputSettingKey) }
     }
     private let copilot = PromptCopilotCompletionServer()
     private var startupCWD = FileManager.default.homeDirectoryForCurrentUser.path
@@ -2105,7 +2105,7 @@ final class PromptAutocompleteModel: ObservableObject {
     private var pending: DispatchWorkItem?
 
     private init() {
-        completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputDefaultsKey) ?? false
+        completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputSettingKey) ?? false
         copilot.onStatus = { status in
             #if DEBUG
             PromptAIDebug.emit("Copilot Completion", "status", status)

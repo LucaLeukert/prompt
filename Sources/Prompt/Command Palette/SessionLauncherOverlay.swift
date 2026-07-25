@@ -163,7 +163,6 @@ struct PromptRemoteSession: Codable, Hashable {
     private static let logger = Logger(subsystem: "net.leukert.prompt", category: "tailnet-discovery")
     private static let savedKey = "PromptPersistentRemoteSessions"
     private static let tailnetSavedKey = "PromptDiscoveredTailnetHosts"
-    private static let gitLocationsCacheKey = "PromptDiscoveredGitLocations"
     private static let gitLocationsCacheFileName = "git-locations.json"
     private static let gitLocationsCacheLimit = 40
     private static var tailnetCache: (date: Date, hosts: [String])?
@@ -309,8 +308,7 @@ struct PromptRemoteSession: Codable, Hashable {
     }
 
     static func cachedGitLocations(
-        paths: PromptPaths = PromptPaths(),
-        legacyDefaults: UserDefaults = .standard
+        paths: PromptPaths = PromptPaths()
     ) -> [PromptLocalSessionLauncher.GitLocation] {
         let cacheFile = paths.cacheFile(gitLocationsCacheFileName)
         if let data = try? Data(contentsOf: cacheFile),
@@ -321,25 +319,14 @@ struct PromptRemoteSession: Codable, Hashable {
             return Array(locations.prefix(gitLocationsCacheLimit))
         }
 
-        guard let data = legacyDefaults.data(forKey: gitLocationsCacheKey),
-              let locations = try? JSONDecoder().decode(
-                  [PromptLocalSessionLauncher.GitLocation].self,
-                  from: data)
-        else { return [] }
-
-        let bounded = Array(locations.prefix(gitLocationsCacheLimit))
-        if persistGitLocations(bounded, paths: paths) {
-            legacyDefaults.removeObject(forKey: gitLocationsCacheKey)
-        }
-        return bounded
+        return []
     }
 
     static func rememberGitLocations(
         _ locations: [PromptLocalSessionLauncher.GitLocation],
-        paths: PromptPaths = PromptPaths(),
-        legacyDefaults: UserDefaults = .standard
+        paths: PromptPaths = PromptPaths()
     ) {
-        let existing = cachedGitLocations(paths: paths, legacyDefaults: legacyDefaults)
+        let existing = cachedGitLocations(paths: paths)
         let refreshedPaths = Set(locations.map(\.path))
         let ordered = locations + existing.filter { !refreshedPaths.contains($0.path) }
         let bounded = Array(ordered.prefix(gitLocationsCacheLimit))
@@ -348,11 +335,10 @@ struct PromptRemoteSession: Codable, Hashable {
 
     static func forgetCachedGitLocation(
         _ path: String,
-        paths: PromptPaths = PromptPaths(),
-        legacyDefaults: UserDefaults = .standard
+        paths: PromptPaths = PromptPaths()
     ) {
         let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
-        let remaining = cachedGitLocations(paths: paths, legacyDefaults: legacyDefaults).filter {
+        let remaining = cachedGitLocations(paths: paths).filter {
             URL(fileURLWithPath: $0.path).standardizedFileURL.path != normalized
         }
         _ = persistGitLocations(remaining, paths: paths)
