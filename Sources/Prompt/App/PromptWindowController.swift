@@ -72,6 +72,12 @@ private final class PromptWindow: NSWindow {
         // after it has genuinely moved outside the palette field.
         if firstResponder !== field, firstResponder !== field.currentEditor() {
             makeFirstResponder(field)
+            // AppKit selects the entire value when a populated NSTextField
+            // becomes first responder. Folder paths are edited far more often
+            // by appending, so place the insertion point at the end instead.
+            if let editor = field.currentEditor() {
+                editor.selectedRange = NSRange(location: field.stringValue.utf16.count, length: 0)
+            }
         }
         return true
     }
@@ -337,10 +343,19 @@ private struct PromptSidebarSessionRow: View {
     }
     private var metadata: String {
         let path = abbreviated(directory)
-        if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
-            return "\(path)  ·  git:\(branch)"
+        let prefix = session.configuration.localTypeLabel.map { "\($0)  ·  " } ?? ""
+        if let identity = session.configuration.containerIdentity {
+            return "\(prefix)\(identity)  ·  \(path)"
         }
-        return path
+        if let repository = session.configuration.worktreeRepository {
+            let repo = URL(fileURLWithPath: repository).lastPathComponent
+            let branch = session.configuration.worktreeBranch ?? runtime.localGitBranches[session.focusedPaneID]
+            return "\(prefix)\(repo)" + (branch.map { "  ·  git:\($0)" } ?? "")
+        }
+        if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+            return "\(prefix)\(path)  ·  git:\(branch)"
+        }
+        return prefix + path
     }
 
     private enum AgentKind {
@@ -482,11 +497,14 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var standardRow: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: remoteConnectionState?.isOffline == true ? "wifi.exclamationmark" : (session.configuration.isRemote ? "network" : "terminal"))
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: remoteConnectionState?.isOffline == true
+                ? "wifi.exclamationmark"
+                : session.configuration.sidebarIcon)
                 .font(.system(size: 14))
-                .foregroundStyle(remoteConnectionState?.isOffline == true ? Color.red : Color.secondary)
-                .frame(width: 18).padding(.top, 2)
+                .foregroundStyle(session.configuration.isPrivileged ? Color.orange : (remoteConnectionState?.isOffline == true ? Color.red : Color.secondary))
+                .frame(width: 18, height: 18, alignment: .center)
+                .help(session.configuration.sidebarSummary)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
@@ -502,10 +520,9 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private func agentRow(_ kind: AgentKind) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             CodexMark()
                 .frame(width: 18, height: 18)
-                .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
@@ -781,6 +798,66 @@ extension PromptSessionConfiguration {
         return false
     }
 
+    var isAnchored: Bool {
+        guard case .local(let local) = self else { return false }
+        return local.behavior == .anchored
+    }
+
+    var isPrivileged: Bool {
+        guard case .local(let local) = self else { return false }
+        return local.behavior == .privileged
+    }
+
+    var localTypeLabel: String? {
+        guard case .local(let local) = self else { return nil }
+        switch local.behavior {
+        case .standard: return nil
+        case .anchored: return "Anchored"
+        case .task:
+            if let code = local.lastExitCode { return code == 0 ? "Completed" : "Failed \(code)" }
+            return "Task"
+        case .disposable: return "Disposable"
+        case .scratch: return "Scratch"
+        case .project: return "Project"
+        case .worktree: return "Worktree"
+        case .container: return "Container"
+        case .privileged: return "PRIVILEGED"
+        }
+    }
+
+    var sidebarIcon: String {
+        switch self {
+        case .remote: return "network"
+        case .local(let local):
+            switch local.behavior {
+            case .standard: return "terminal"
+            case .anchored: return "pin"
+            case .task: return local.lastExitCode.map { $0 == 0 ? "checkmark.circle" : "xmark.circle" } ?? "play.circle"
+            case .disposable: return "timer"
+            case .scratch: return "square.dashed"
+            case .project: return "folder"
+            case .worktree: return "arrow.triangle.branch"
+            case .container: return "shippingbox"
+            case .privileged: return "lock.shield"
+            }
+        }
+    }
+
+    var containerIdentity: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.composeService.map { "compose:\($0)" } ?? local.details?.container
+    }
+
+    var worktreeRepository: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.repository
+    }
+
+    var worktreeBranch: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.branch
+    }
+
     var sidebarMachine: String {
         switch self { case .local: "Local"; case .remote(let remote): remote.destination }
     }
@@ -793,8 +870,10 @@ extension PromptSessionConfiguration {
     }
     var sidebarSummary: String {
         switch self {
-        case .local(let local): local.command.map { "Local · \($0)" } ?? "Local shell"
-        case .remote(let remote): "SSH · \(remote.destination) · persistent"
+        case .local(let local):
+            let type = localTypeLabel ?? "Local"
+            return local.command.map { "\(type) · \($0)" } ?? "\(type) shell"
+        case .remote(let remote): return "SSH · \(remote.destination) · persistent"
         }
     }
 }

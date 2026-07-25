@@ -7,6 +7,18 @@ import Testing
 
 @Suite("Prompt AI integration")
 struct PromptAITests {
+    @Test @MainActor func currentDirectoryActionsKeepSpecializedSessionTypesOutOfTheRootPalette() {
+        #expect(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.title) == [
+            "Anchored session",
+            "Run task…",
+            "Disposable session…",
+            "Scratch workspace",
+            "Privileged session…",
+            "Codex agent",
+        ])
+        #expect(Set(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.icon)).count == 6)
+    }
+
     @Test func tmuxControlOutputDecodesOctalAndEscapedBackslashes() {
         #expect(PromptTmuxControlParser.decode(#"hello\015\012path\\name"#) == Array("hello\r\npath\\name".utf8))
     }
@@ -212,16 +224,14 @@ struct PromptAITests {
     }
 
     @Test func remoteAIExperimentIsDisabledUnlessExplicitlyEnabled() {
-        let suite = "PromptAITests.RemoteAIExperiment.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else {
-            Issue.record("Could not create an isolated UserDefaults suite")
-            return
-        }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prompt-remote-ai-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home))
 
-        #expect(!PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
-        defaults.set(true, forKey: PromptExperimentalFeatures.remoteAIEnabledDefaultsKey)
-        #expect(PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
+        #expect(!PromptExperimentalFeatures.remoteAIEnabled(in: settings))
+        settings.set(true, forKey: PromptExperimentalFeatures.remoteAIEnabledSettingKey)
+        #expect(PromptExperimentalFeatures.remoteAIEnabled(in: settings))
     }
 
     @Test func dynamicTerminalToolSpecsUseFunctionProtocol() {

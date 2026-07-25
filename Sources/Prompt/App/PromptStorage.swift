@@ -29,26 +29,22 @@ struct PromptPaths {
     }
 }
 
-/// A small, typed JSON settings store. Keeping the storage API here makes
-/// adding future settings independent from Foundation's UserDefaults domains.
+/// A small, typed JSON settings store backed by `~/.prompt/config.json`.
 final class PromptSettings {
     static let shared = PromptSettings()
 
     private let paths: PromptPaths
     private let fileManager: FileManager
-    private let legacyDefaults: [UserDefaults]
     private let lock = NSLock()
     private var values: [String: JSONValue]
     private let canPersist: Bool
 
     init(
         paths: PromptPaths = PromptPaths(),
-        fileManager: FileManager = .default,
-        legacyDefaults: [UserDefaults] = [.ghostty, .standard]
+        fileManager: FileManager = .default
     ) {
         self.paths = paths
         self.fileManager = fileManager
-        self.legacyDefaults = legacyDefaults
         try? paths.prepare(fileManager: fileManager)
         if fileManager.fileExists(atPath: paths.settings.path) {
             if let data = try? Data(contentsOf: paths.settings),
@@ -70,16 +66,7 @@ final class PromptSettings {
 
     func value<T: Codable>(_ type: T.Type = T.self, forKey key: String) -> T? {
         lock.withLock {
-            if let stored = values[key] { return stored.decode(type) }
-            guard let source = legacyDefaults.first(where: { $0.object(forKey: key) != nil }),
-                  let legacy = source.object(forKey: key),
-                  let migrated = JSONValue(propertyListValue: legacy),
-                  let result = migrated.decode(type) else { return nil }
-            values[key] = migrated
-            if persist() {
-                source.removeObject(forKey: key)
-            }
-            return result
+            values[key]?.decode(type)
         }
     }
 
@@ -112,26 +99,6 @@ private enum JSONValue: Codable {
         guard let data = try? JSONEncoder().encode(value),
               let decoded = try? JSONDecoder().decode(JSONValue.self, from: data) else { return nil }
         self = decoded
-    }
-
-    init?(propertyListValue value: Any) {
-        switch value {
-        case let value as Bool: self = .bool(value)
-        case let value as NSNumber: self = .number(value.doubleValue)
-        case let value as String: self = .string(value)
-        case let value as Data:
-            guard let decoded = try? JSONDecoder().decode(JSONValue.self, from: value) else { return nil }
-            self = decoded
-        case let value as [Any]:
-            let converted = value.compactMap(JSONValue.init(propertyListValue:))
-            guard converted.count == value.count else { return nil }
-            self = .array(converted)
-        case let value as [String: Any]:
-            let converted = value.compactMapValues(JSONValue.init(propertyListValue:))
-            guard converted.count == value.count else { return nil }
-            self = .object(converted)
-        default: return nil
-        }
     }
 
     func decode<T: Decodable>(_ type: T.Type) -> T? {

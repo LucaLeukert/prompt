@@ -16,9 +16,19 @@ private func promptCompositeOutputTee(
 /// that owns SSH/tmux. Output is mirrored byte-for-byte; already-encoded input
 /// travels in the other direction without text/paste re-encoding.
 final class PromptCompositeIORouter: @unchecked Sendable {
+    static let remoteReadyMarker = Data("\u{1B}]777;prompt-remote-ready\u{07}".utf8)
+
     private let lock = NSLock()
+    private let suppressOutputUntilRemoteReady: Bool
     private var authority: ghostty_surface_t?
     private var presentation: ghostty_surface_t?
+    private var awaitingRemoteReady: Bool
+    private var pendingOutput = Data()
+
+    init(suppressOutputUntilRemoteReady: Bool = false) {
+        self.suppressOutputUntilRemoteReady = suppressOutputUntilRemoteReady
+        awaitingRemoteReady = suppressOutputUntilRemoteReady
+    }
 
     func install(authority: ghostty_surface_t, presentation: ghostty_surface_t) {
         lock.lock()
@@ -49,9 +59,28 @@ final class PromptCompositeIORouter: @unchecked Sendable {
     func forwardOutput(_ bytes: UnsafePointer<CChar>, count: UInt) {
         lock.lock()
         let target = presentation
+        var output = Data(bytes: bytes, count: Int(count))
+        if awaitingRemoteReady {
+            pendingOutput.append(output)
+            if let marker = pendingOutput.range(of: Self.remoteReadyMarker) {
+                output = Data(pendingOutput[marker.upperBound...])
+                pendingOutput.removeAll()
+                awaitingRemoteReady = false
+            } else {
+                // Retain only enough suffix to recognize a marker split across
+                // callback chunks. All earlier bytes belong to the local
+                // authority shell and must never reach the remote terminal.
+                let retained = min(pendingOutput.count, Self.remoteReadyMarker.count - 1)
+                pendingOutput = Data(pendingOutput.suffix(retained))
+                output.removeAll()
+            }
+        }
         lock.unlock()
-        guard let target else { return }
-        ghostty_surface_process_output(target, bytes, count)
+        guard let target, !output.isEmpty else { return }
+        output.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: CChar.self) else { return }
+            ghostty_surface_process_output(target, base, UInt(raw.count))
+        }
     }
 
     func disconnect() {
@@ -59,6 +88,8 @@ final class PromptCompositeIORouter: @unchecked Sendable {
         let source = authority
         authority = nil
         presentation = nil
+        pendingOutput.removeAll()
+        awaitingRemoteReady = suppressOutputUntilRemoteReady
         lock.unlock()
         if let source { ghostty_surface_set_pty_tee_cb(source, nil, nil) }
     }
@@ -125,6 +156,20 @@ final class PromptTerminalSurface: GhosttyAppKitSurface {
         authoritativeSurface?.requestClose()
         authoritativeSurface = nil
         compositeRouter = nil
+    }
+
+    /// Interrupts the foreground process just as if the user pressed Control-C.
+    func interruptForegroundProcess() {
+        guard let surface = surfaceHandle else { return }
+        var event = ghostty_input_key_s()
+        event.action = GHOSTTY_ACTION_PRESS
+        event.keycode = 0x08 // macOS virtual key code for C
+        event.text = nil
+        event.composing = false
+        event.mods = GHOSTTY_MODS_CTRL
+        event.consumed_mods = GHOSTTY_MODS_NONE
+        event.unshifted_codepoint = 99
+        _ = ghostty_surface_key(surface, event)
     }
 }
 

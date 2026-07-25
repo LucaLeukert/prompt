@@ -1168,7 +1168,7 @@ final class PromptModel: ObservableObject {
     @Published var status = "Starting Codex…"
     @Published var account = "Codex"
     @Published var rateLimits = "Limits loading…"
-    @Published var projectRoot = FileManager.default.currentDirectoryPath
+    @Published var projectRoot = FileManager.default.homeDirectoryForCurrentUser.path
     @Published var terminalContext = ""
     @Published var threads: [PromptThread] = []
     @Published var activeThreadID: String?
@@ -2089,15 +2089,15 @@ final class PromptModel: ObservableObject {
 @MainActor
 final class PromptAutocompleteModel: ObservableObject {
     static let shared = PromptAutocompleteModel()
-    private static let completeAIInputDefaultsKey = "PromptCopilotCompletesAIInput"
+    private static let completeAIInputSettingKey = "PromptCopilotCompletesAIInput"
 
     @Published private var suggestions: [ObjectIdentifier: [String]] = [:]
     @Published private var selectedIndices: [ObjectIdentifier: Int] = [:]
     @Published var completesAIInput: Bool {
-        didSet { PromptSettings.shared.set(completesAIInput, forKey: Self.completeAIInputDefaultsKey) }
+        didSet { PromptSettings.shared.set(completesAIInput, forKey: Self.completeAIInputSettingKey) }
     }
     private let copilot = PromptCopilotCompletionServer()
-    private var startupCWD = FileManager.default.currentDirectoryPath
+    private var startupCWD = FileManager.default.homeDirectoryForCurrentUser.path
     private var activeSurfaceID: ObjectIdentifier?
     private weak var activeSurface: PromptTerminalSurface?
     private var activePrefix = ""
@@ -2105,7 +2105,7 @@ final class PromptAutocompleteModel: ObservableObject {
     private var pending: DispatchWorkItem?
 
     private init() {
-        completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputDefaultsKey) ?? false
+        completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputSettingKey) ?? false
         copilot.onStatus = { status in
             #if DEBUG
             PromptAIDebug.emit("Copilot Completion", "status", status)
@@ -2489,7 +2489,7 @@ final class PromptCopilotCompletionServer {
     private let queue = DispatchQueue(label: "dev.prompt.copilot-lsp")
     private var initialized = false
     private var starting = false
-    private var workspace = FileManager.default.currentDirectoryPath
+    private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
     private var documentURI = ""
     private var documentVersion = 0
     private var pendingCompletion: (prefix: String, cwd: String, terminal: String, completion: ([String]) -> Void)?
@@ -2936,7 +2936,7 @@ final class PromptController: NSObject {
     private weak var terminalWindow: NSWindow?
 
     func install() {
-        let cwd = activeSurface()?.pwd ?? FileManager.default.currentDirectoryPath
+        let cwd = activeSurface()?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
         PromptModel.shared.start(cwd: cwd)
     }
 

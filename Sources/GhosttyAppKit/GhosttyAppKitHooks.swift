@@ -14,4 +14,5 @@ enum GhosttyAppKitHooks {
     static var keyDown: ((Ghostty.SurfaceView, NSEvent, Bool) -> Bool)?
     static var terminalDidReset: ((Ghostty.SurfaceView) -> Void)?
     static var commandDidFinish: ((Ghostty.SurfaceView, Int, UInt64) -> Void)?
+    static var childDidExit: ((Ghostty.SurfaceView, Int) -> Bool)?
 }
