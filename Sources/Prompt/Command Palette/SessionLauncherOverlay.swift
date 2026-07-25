@@ -314,8 +314,7 @@ struct PromptRemoteSession: Codable, Hashable {
         if let data = try? Data(contentsOf: cacheFile),
            let locations = try? JSONDecoder().decode(
                [PromptLocalSessionLauncher.GitLocation].self,
-               from: data)
-        {
+               from: data) {
             return Array(locations.prefix(gitLocationsCacheLimit))
         }
 

@@ -59,8 +59,7 @@ enum PromptLocalSessionLauncher {
             !cachedPaths.contains(URL(fileURLWithPath: $0).standardizedFileURL.path)
         }.compactMap(gitRoot))
         if !cachedPaths.contains(searchURL.path),
-           let root = gitRoot(containing: searchURL.path)
-        {
+           let root = gitRoot(containing: searchURL.path) {
             roots.insert(root)
         }
 

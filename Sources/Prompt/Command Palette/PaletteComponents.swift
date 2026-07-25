@@ -859,8 +859,7 @@ private struct FolderPickerView: View {
                                 name: entry.name,
                                 subtitle: entry.subtitle,
                                 icon: entry.icon,
-                                selected: selectedIndex == rowIndex)
-                            {
+                                selected: selectedIndex == rowIndex) {
                                 activate(entry)
                             }
                             .id(entry.id)
@@ -1348,8 +1347,7 @@ private struct CommandPaletteQuery: View {
                     if PromptPaletteFocusLossPolicy.shouldDismiss(
                         focused: focused,
                         dismissOnFocusLoss: dismissOnFocusLoss,
-                        suppressesFocusLoss: suppressesFocusLoss)
-                    {
+                        suppressesFocusLoss: suppressesFocusLoss) {
                         onEvent?(.exit)
                     }
                 }
