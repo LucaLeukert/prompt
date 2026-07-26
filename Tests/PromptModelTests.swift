@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import Combine
+import SwiftUI
 @testable import Prompt
 
 final class PromptModelTests: XCTestCase {
@@ -50,30 +51,16 @@ final class PromptModelTests: XCTestCase {
         XCTAssertTrue(gate.begin())
     }
 
-    func testPaletteNavigationTreatsEverySubmenuAsOneRouteStack() {
-        var navigation = PromptPaletteNavigation()
-        let child = PromptCommandOption(title: "Child") {}
+    @MainActor
+    func testPaletteNavigatorOwnsOnlyDestinationIdentity() {
+        let navigation = PromptPaletteNavigator()
 
-        XCTAssertTrue(navigation.isAtRoot)
-        XCTAssertFalse(navigation.pop())
+        XCTAssertTrue(navigation.path.isEmpty)
+        navigation.push { AnyView(Text("Child")) }
+        XCTAssertEqual(navigation.path.count, 1)
 
-        navigation.push(.commands(title: "Parent", options: [child]))
-        XCTAssertFalse(navigation.isAtRoot)
-        guard case .commands(let title, let options) = navigation.current else {
-            return XCTFail("Expected a command route")
-        }
-        XCTAssertEqual(title, "Parent")
-        XCTAssertEqual(options.map(\.title), ["Child"])
-
-        XCTAssertTrue(navigation.pop())
-        XCTAssertTrue(navigation.isAtRoot)
-    }
-
-    func testPaletteReturnStateRetainsParentQueryAndSelection() {
-        let state = PromptPaletteReturnState(rawQuery: "git", selectedIndex: 2)
-
-        XCTAssertEqual(state.rawQuery, "git")
-        XCTAssertEqual(state.selectedIndex, 2)
+        navigation.pop()
+        XCTAssertTrue(navigation.path.isEmpty)
     }
 
     @MainActor

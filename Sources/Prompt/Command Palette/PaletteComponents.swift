@@ -15,7 +15,7 @@ private struct PromptGlassEffectContainer<Content: View>: View {
     }
 }
 
-private extension View {
+extension View {
     @ViewBuilder
     func promptLiquidGlassSurface(tint: Color? = nil, cornerRadius: CGFloat) -> some View {
         if #available(macOS 26.0, *) {
@@ -76,509 +76,733 @@ struct PromptCommandAction: Identifiable {
     let action: () -> Void
 }
 
-enum PromptCommandBehavior {
-    case perform(() -> Void)
-    case submenu(() -> [PromptCommandOption])
-    case folder(PromptFolderPickerConfiguration)
-    case git(PromptGitPickerConfiguration)
-    case sidebar(PromptWorkspaceStore)
-}
-
-struct PromptCommandOption: Identifiable, Hashable {
-    /// Unique identifier for this option.
-    let id = UUID()
-    /// The primary text displayed for this command.
+private struct PromptCommandPresentation {
+    private(set) var id = UUID()
     let title: String
-    /// Group heading displayed above related commands.
-    let section: String
-    /// Secondary text displayed below the title.
-    let subtitle: String?
-    /// Tooltip text shown on hover.
-    let description: String?
-    /// Keyboard shortcut symbols to display.
-    let symbols: [String]?
-    /// SF Symbol name for the leading icon.
-    let leadingIcon: String?
-    /// Color for the leading indicator circle.
-    let leadingColor: Color?
-    /// Badge text displayed as a pill.
-    let badge: String?
-    /// Whether to visually emphasize this option.
-    let emphasis: Bool
-    /// Sort key for stable ordering when titles are equal.
-    let sortKey: AnySortKey?
-    /// What selecting this option does. Every command uses the same typed
-    /// behavior model, whether it performs work or opens another palette route.
-    let behavior: PromptCommandBehavior
-    /// Actions shown by Cmd-K for this exact command. These travel with an
-    /// option into child pages instead of falling back to palette-wide actions.
-    let contextualActions: (() -> [PromptCommandAction])?
-    let primaryActionTitle: String
+    private(set) var subtitle: String?
+    private(set) var description: String?
+    private(set) var symbols: [String]?
+    private(set) var leadingIcon: String?
+    private(set) var leadingColor: Color?
+    private(set) var badge: String?
+    private(set) var emphasis = false
+    private(set) var contextualActions: (() -> [PromptCommandAction])?
+    private(set) var primaryActionTitle: String
+    private(set) var opensDestination = false
+    private(set) var isEnabled = true
 
-    init(
-        title: String,
-        section: String = "Commands",
-        subtitle: String? = nil,
-        description: String? = nil,
-        symbols: [String]? = nil,
-        leadingIcon: String? = nil,
-        leadingColor: Color? = nil,
-        badge: String? = nil,
-        emphasis: Bool = false,
-        sortKey: AnySortKey? = nil,
-        primaryActionTitle: String? = nil,
-        contextualActions: (() -> [PromptCommandAction])? = nil,
-        action: @escaping () -> Void
-    ) {
+    init(_ title: String) {
         self.title = title
-        self.section = section
-        self.subtitle = subtitle
-        self.description = description
-        self.symbols = symbols
-        self.leadingIcon = leadingIcon
-        self.leadingColor = leadingColor
-        self.badge = badge
-        self.emphasis = emphasis
-        self.sortKey = sortKey
-        self.behavior = .perform(action)
-        self.contextualActions = contextualActions
-        self.primaryActionTitle = primaryActionTitle ?? title
+        self.primaryActionTitle = title
     }
 
-    init(
-        title: String,
-        section: String = "Commands",
-        subtitle: String? = nil,
-        description: String? = nil,
-        symbols: [String]? = nil,
-        leadingIcon: String? = nil,
-        primaryActionTitle: String? = nil,
-        contextualActions: (() -> [PromptCommandAction])? = nil,
-        children: @escaping () -> [PromptCommandOption]
-    ) {
-        self.title = title
-        self.section = section
-        self.subtitle = subtitle
-        self.description = description
-        self.symbols = symbols
-        self.leadingIcon = leadingIcon
-        self.leadingColor = nil
-        self.badge = nil
-        self.emphasis = false
-        self.sortKey = nil
-        self.behavior = .submenu(children)
-        self.contextualActions = contextualActions
-        self.primaryActionTitle = primaryActionTitle ?? "Open \(title)"
+    func identified(by id: UUID) -> Self {
+        setting(\.id, to: id)
     }
 
-    init(
-        title: String,
-        section: String = "Commands",
-        subtitle: String? = nil,
-        description: String? = nil,
-        leadingIcon: String = "folder.badge.plus",
-        folderPicker: PromptFolderPickerConfiguration,
-        primaryActionTitle: String? = nil,
-        contextualActions: (() -> [PromptCommandAction])? = nil
-    ) {
-        self.title = title
-        self.section = section
-        self.subtitle = subtitle
-        self.description = description
-        self.symbols = nil
-        self.leadingIcon = leadingIcon
-        self.leadingColor = nil
-        self.badge = nil
-        self.emphasis = false
-        self.sortKey = nil
-        self.behavior = .folder(folderPicker)
-        self.contextualActions = contextualActions
-        self.primaryActionTitle = primaryActionTitle ?? "Browse \(title)"
+    func subtitle(_ value: String?) -> Self {
+        setting(\.subtitle, to: value)
     }
 
-    init(
-        title: String,
-        section: String = "Commands",
-        subtitle: String? = nil,
-        description: String? = nil,
-        leadingIcon: String = "arrow.triangle.branch",
-        gitPicker: PromptGitPickerConfiguration,
-        primaryActionTitle: String? = nil,
-        contextualActions: (() -> [PromptCommandAction])? = nil
-    ) {
-        self.title = title
-        self.section = section
-        self.subtitle = subtitle
-        self.description = description
-        self.symbols = nil
-        self.leadingIcon = leadingIcon
-        self.leadingColor = nil
-        self.badge = nil
-        self.emphasis = false
-        self.sortKey = nil
-        self.behavior = .git(gitPicker)
-        self.contextualActions = contextualActions
-        self.primaryActionTitle = primaryActionTitle ?? "Browse \(title)"
+    func help(_ value: String?) -> Self {
+        setting(\.description, to: value)
     }
 
-    init(title: String, section: String = "Commands", subtitle: String? = nil, description: String? = nil, leadingIcon: String = "sidebar.left", sidebarEditor: PromptWorkspaceStore, contextualActions: (() -> [PromptCommandAction])? = nil) {
-        self.title = title
-        self.section = section
-        self.subtitle = subtitle
-        self.description = description
-        self.symbols = ["⌘", "K"]
-        self.leadingIcon = leadingIcon
-        self.leadingColor = nil
-        self.badge = nil
-        self.emphasis = false
-        self.sortKey = nil
-        self.behavior = .sidebar(sidebarEditor)
-        self.contextualActions = contextualActions
-        self.primaryActionTitle = "Edit sidebar"
+    func shortcut(_ symbols: String...) -> Self {
+        setting(\.symbols, to: symbols)
     }
 
-    static func == (lhs: PromptCommandOption, rhs: PromptCommandOption) -> Bool {
-        lhs.id == rhs.id
+    func shortcut(_ symbols: [String]) -> Self {
+        setting(\.symbols, to: symbols)
     }
 
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
+    func icon(_ name: String?) -> Self {
+        setting(\.leadingIcon, to: name)
     }
 
-    var opensRoute: Bool {
-        switch behavior {
-        case .perform: false
-        case .submenu, .folder, .git, .sidebar: true
-        }
+    func color(_ value: Color?) -> Self {
+        setting(\.leadingColor, to: value)
+    }
+
+    func badge(_ value: String?) -> Self {
+        setting(\.badge, to: value)
+    }
+
+    func emphasized(_ value: Bool = true) -> Self {
+        setting(\.emphasis, to: value)
+    }
+
+    func primaryAction(_ title: String) -> Self {
+        setting(\.primaryActionTitle, to: title)
+    }
+
+    func actions(_ actions: @escaping () -> [PromptCommandAction]) -> Self {
+        setting(\.contextualActions, to: actions)
+    }
+
+    func destination(_ value: Bool = true) -> Self {
+        setting(\.opensDestination, to: value)
+    }
+
+    func enabled(_ value: Bool) -> Self {
+        setting(\.isEnabled, to: value)
+    }
+
+    private func setting<Value>(
+        _ keyPath: WritableKeyPath<Self, Value>,
+        to value: Value
+    ) -> Self {
+        var copy = self
+        copy[keyPath: keyPath] = value
+        return copy
+    }
+
+    var hasActionMenu: Bool {
+        !(contextualActions?().isEmpty ?? true)
     }
 }
 
-enum PromptPaletteRoute {
-    case commands(title: String, options: [PromptCommandOption])
-    case folder(PromptFolderPickerConfiguration)
-    case git(PromptGitPickerConfiguration)
-    case sidebar(PromptWorkspaceStore)
-}
+private struct PromptRenderedCommand: Equatable {
+    let presentation: PromptCommandPresentation
+    let activate: () -> Void
 
-struct PromptPaletteNavigation {
-    private(set) var routes: [PromptPaletteRoute] = []
-
-    var current: PromptPaletteRoute? { routes.last }
-    var isAtRoot: Bool { routes.isEmpty }
-
-    mutating func push(_ route: PromptPaletteRoute) {
-        routes.append(route)
-    }
-
-    @discardableResult
-    mutating func pop() -> Bool {
-        guard !routes.isEmpty else { return false }
-        routes.removeLast()
-        return true
-    }
-
-    mutating func reset() {
-        routes.removeAll()
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.presentation.id == rhs.presentation.id &&
+            lhs.presentation.title == rhs.presentation.title &&
+            lhs.presentation.subtitle == rhs.presentation.subtitle &&
+            lhs.presentation.primaryActionTitle == rhs.presentation.primaryActionTitle &&
+            lhs.presentation.hasActionMenu == rhs.presentation.hasActionMenu &&
+            lhs.presentation.opensDestination == rhs.presentation.opensDestination &&
+            lhs.presentation.isEnabled == rhs.presentation.isEnabled
     }
 }
 
-struct PromptPaletteReturnState: Equatable {
-    let rawQuery: String
-    let selectedIndex: UInt?
+private struct PromptRenderedCommandsKey: PreferenceKey {
+    static var defaultValue: [PromptRenderedCommand] = []
+
+    static func reduce(
+        value: inout [PromptRenderedCommand],
+        nextValue: () -> [PromptRenderedCommand]
+    ) {
+        value.append(contentsOf: nextValue())
+    }
 }
 
-struct PromptCommandPaletteContentView: View {
-    @ObservedObject var store: PromptWorkspaceStore
-    @Binding var isPresented: Bool
-    var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
-    var options: [PromptCommandOption]
-    @State private var rawQuery = ""
-    @State private var selectedIndex: UInt? = 0
-    @State private var navigation = PromptPaletteNavigation()
-    @State private var returnStates: [PromptPaletteReturnState] = []
-    @State private var isRestoringReturnState = false
-    @State private var actionsArePresented = false
-    @State private var submitGate = PromptPaletteSubmitGate()
-    @State private var pointerLocationAtKeyboardNavigation: CGPoint?
-    @State private var pointerTrackingStarted = false
-    @State private var keyboardOwner = UUID()
-    private var keyboard: PromptInputRouter { store.inputRouter }
+private struct PromptPaletteQueryKey: EnvironmentKey {
+    static let defaultValue = ""
+}
 
-    private var commandRoute: (title: String?, options: [PromptCommandOption]) {
-        if case .some(.commands(let title, let options)) = navigation.current {
-            return (title, options)
-        }
-        return (nil, options)
+private struct PromptPaletteSelectionKey: EnvironmentKey {
+    static let defaultValue: UUID? = nil
+}
+
+private struct PromptPaletteHoverKey: EnvironmentKey {
+    static let defaultValue: (UUID) -> Void = { _ in }
+}
+
+private extension EnvironmentValues {
+    var promptPaletteQuery: String {
+        get { self[PromptPaletteQueryKey.self] }
+        set { self[PromptPaletteQueryKey.self] = newValue }
     }
 
-    private var visibleOptions: [PromptCommandOption] { commandRoute.options }
-
-    var query: String {
-        rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    var promptPaletteSelection: UUID? {
+        get { self[PromptPaletteSelectionKey.self] }
+        set { self[PromptPaletteSelectionKey.self] = newValue }
     }
 
-    // The options that we should show, taking into account any filtering from
-    // the query. Options with matching leadingColor are ranked higher.
-    var filteredOptions: [PromptCommandOption] {
-        if query.isEmpty {
-            return visibleOptions
-        } else {
-            // Filter by title/subtitle match OR color match
-            let filtered = visibleOptions.filter {
-                $0.title.promptMatchedIndices(for: query) != nil ||
-                    ($0.subtitle?.promptMatchedIndices(for: query) != nil) ||
-                    colorMatchScore(for: $0.leadingColor, query: query) > 0
+    var promptPaletteHover: (UUID) -> Void {
+        get { self[PromptPaletteHoverKey.self] }
+        set { self[PromptPaletteHoverKey.self] = newValue }
+    }
+}
+
+/// A command is a rendered SwiftUI primitive. The page discovers visible
+/// commands through preferences solely for keyboard navigation; the registry
+/// never drives view construction.
+struct PromptPaletteCommand: View {
+    private var presentation: PromptCommandPresentation
+    private var action: () -> Void
+    private var destination: (() -> AnyView)?
+    @State private var id = UUID()
+
+    init(_ title: String, action: @escaping () -> Void = {}) {
+        presentation = PromptCommandPresentation(title)
+        self.action = action
+    }
+
+    var body: some View {
+        PromptPaletteCommandBody(
+            presentation: presentation.identified(by: id),
+            action: action,
+            destination: destination)
+    }
+
+    func subtitle(_ value: String?) -> Self { modifying { $0.presentation = $0.presentation.subtitle(value) } }
+    func help(_ value: String?) -> Self { modifying { $0.presentation = $0.presentation.help(value) } }
+    func shortcut(_ symbols: String...) -> Self { modifying { $0.presentation = $0.presentation.shortcut(symbols) } }
+    func icon(_ name: String?) -> Self { modifying { $0.presentation = $0.presentation.icon(name) } }
+    func color(_ value: Color?) -> Self { modifying { $0.presentation = $0.presentation.color(value) } }
+    func badge(_ value: String?) -> Self { modifying { $0.presentation = $0.presentation.badge(value) } }
+    func emphasized(_ value: Bool = true) -> Self {
+        modifying { $0.presentation = $0.presentation.emphasized(value) }
+    }
+    func primaryAction(_ title: String) -> Self {
+        modifying { $0.presentation = $0.presentation.primaryAction(title) }
+    }
+    func actions(_ actions: @escaping () -> [PromptCommandAction]) -> Self {
+        modifying { $0.presentation = $0.presentation.actions(actions) }
+    }
+    func enabled(_ value: Bool) -> Self {
+        modifying { $0.presentation = $0.presentation.enabled(value) }
+    }
+
+    func destination<Destination: View>(
+        title: String? = nil,
+        @ViewBuilder _ destination: @escaping () -> Destination
+    ) -> Self {
+        modifying {
+            $0.presentation = $0.presentation.destination()
+            if let title {
+                $0.presentation = $0.presentation.primaryAction(title)
             }
-
-            // Sort by color match score (higher scores first), then maintain original order
-            return filtered.sorted { a, b in
-                let scoreA = colorMatchScore(for: a.leadingColor, query: query)
-                let scoreB = colorMatchScore(for: b.leadingColor, query: query)
-                return scoreA > scoreB
-            }
+            $0.destination = { AnyView(destination()) }
         }
     }
 
-    var selectedOption: PromptCommandOption? {
-        guard let selectedIndex else { return nil }
-        return if selectedIndex < filteredOptions.count {
-            filteredOptions[Int(selectedIndex)]
-        } else {
-            filteredOptions.last
+    private func modifying(_ transform: (inout Self) -> Void) -> Self {
+        var copy = self
+        transform(&copy)
+        return copy
+    }
+}
+
+private struct PromptPaletteCommandBody: View {
+    let presentation: PromptCommandPresentation
+    let action: () -> Void
+    let destination: (() -> AnyView)?
+    @EnvironmentObject private var navigator: PromptPaletteNavigator
+    @Environment(\.promptPaletteQuery) private var query
+    @Environment(\.promptPaletteSelection) private var selectedID
+    @Environment(\.promptPaletteHover) private var hover
+
+    private var matches: Bool {
+        query.isEmpty ||
+            presentation.title.promptMatchedIndices(for: query) != nil ||
+            presentation.subtitle?.promptMatchedIndices(for: query) != nil ||
+            colorMatchScore > 0
+    }
+
+    private var colorMatchScore: Double {
+        guard let color = presentation.leadingColor else { return 0 }
+        let platformColor = NSColor(color)
+        return NSColor.colorNames.reduce(into: 0) { best, name in
+            guard query.lowercased().contains(name),
+                  let candidate = NSColor(named: name) else { return }
+            let distance = platformColor.distance(to: candidate)
+            if distance < 1.5 {
+                best = max(best, 1 - (distance / 1.5))
+            }
         }
     }
 
     var body: some View {
-        let scheme: ColorScheme = if OSColor(backgroundColor).isLightColor {
-            .light
-        } else {
-            .dark
+        if matches {
+            CommandRow(
+                presentation: presentation,
+                query: query,
+                isSelected: selectedID == presentation.id,
+                onHover: {
+                    if presentation.isEnabled {
+                        hover(presentation.id)
+                    }
+                },
+                action: activate)
+                .disabled(!presentation.isEnabled)
+                .opacity(presentation.isEnabled ? 1 : 0.45)
+                .id(presentation.id)
+                .preference(
+                    key: PromptRenderedCommandsKey.self,
+                    value: [PromptRenderedCommand(presentation: presentation, activate: activate)])
+        }
+    }
+
+    private func activate() {
+        if let destination {
+            navigator.push(destination)
+            return
+        }
+        action()
+    }
+}
+
+struct PromptPaletteDestinationID: Hashable {
+    let rawValue = UUID()
+}
+
+@MainActor
+final class PromptPaletteNavigator: ObservableObject {
+    @Published var path: [PromptPaletteDestinationID] = []
+    private var destinations: [PromptPaletteDestinationID: () -> AnyView] = [:]
+
+    func push(_ destination: @escaping () -> AnyView) {
+        let id = PromptPaletteDestinationID()
+        destinations[id] = destination
+        path.append(id)
+    }
+
+    func pop() {
+        if let removed = path.popLast() {
+            destinations.removeValue(forKey: removed)
+        }
+    }
+
+    func reset() {
+        path.removeAll()
+        destinations.removeAll()
+    }
+
+    @ViewBuilder
+    func destination(for id: PromptPaletteDestinationID) -> some View {
+        if let destination = destinations[id] {
+            destination()
+                .environmentObject(self)
+        }
+    }
+}
+
+struct PromptPaletteHost<Root: View>: View {
+    @ViewBuilder let root: () -> Root
+    @StateObject private var navigator = PromptPaletteNavigator()
+
+    var body: some View {
+        NavigationStack(path: $navigator.path) {
+            root()
+                .environmentObject(navigator)
+                .navigationDestination(for: PromptPaletteDestinationID.self) { id in
+                    navigator.destination(for: id)
+                }
+        }
+        .onDisappear { navigator.reset() }
+    }
+}
+
+struct PromptPaletteSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+    @State private var hasVisibleCommands = true
+
+    init(_ title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.content = content
+    }
+
+    var body: some View {
+        Section {
+            content()
+        } header: {
+            if hasVisibleCommands {
+                Text(title.uppercased())
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 4)
+                    .padding(.bottom, 4)
+            }
+        }
+        .onPreferenceChange(PromptRenderedCommandsKey.self) {
+            hasVisibleCommands = !$0.isEmpty
+        }
+    }
+}
+
+private struct PromptPaletteScrollMetrics: Equatable {
+    var contentHeight: CGFloat = 0
+    var contentOffset: CGFloat = 0
+}
+
+private struct PromptPaletteScrollObserver: NSViewRepresentable {
+    final class MarkerView: NSView {
+        var onChange: (PromptPaletteScrollMetrics, CGFloat) -> Void
+        private weak var observedScrollView: NSScrollView?
+        private var observations: [NSObjectProtocol] = []
+
+        init(onChange: @escaping (PromptPaletteScrollMetrics, CGFloat) -> Void) {
+            self.onChange = onChange
+            super.init(frame: .zero)
         }
 
-        PromptGlassEffectContainer(spacing: 18) {
-            if case .some(.sidebar(let sidebarEditor)) = navigation.current {
-                PromptSidebarVisualEditor(
-                    store: sidebarEditor,
-                    keyboard: keyboard,
-                    onBack: leaveSidebarEditor)
-            } else if case .some(.folder(let folderPicker)) = navigation.current {
-                FolderPickerView(
-                    configuration: folderPicker,
-                    isPresented: $isPresented,
-                    keyboard: keyboard,
-                    onBack: leaveFolderPicker)
-            } else if case .some(.git(let gitPicker)) = navigation.current {
-                GitPickerView(
-                    configuration: gitPicker,
-                    isPresented: $isPresented,
-                    keyboard: keyboard,
-                    onBack: leaveFolderPicker)
-            } else {
-                ZStack(alignment: .bottomTrailing) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        CommandPaletteQuery(
-                            query: $rawQuery,
-                            title: commandRoute.title,
-                            canGoBack: !navigation.isAtRoot,
-                            onBack: goBack)
-                            .onChange(of: query) { _ in
-                                guard !isRestoringReturnState else { return }
-                                // Always keep an actionable row selected so Return works immediately.
-                                selectedIndex = filteredOptions.isEmpty ? nil : 0
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            observations.forEach(NotificationCenter.default.removeObserver)
+        }
+
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            attachToScrollView()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            attachToScrollView()
+        }
+
+        func attachToScrollView() {
+            guard let scrollView = enclosingScrollView else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.attachToScrollView()
+                }
+                return
+            }
+            guard observedScrollView !== scrollView else {
+                publishMetrics()
+                return
+            }
+
+            observations.forEach(NotificationCenter.default.removeObserver)
+            observations.removeAll()
+            observedScrollView = scrollView
+            // Keep the document viewport full-width. The custom indicator is
+            // drawn over the outer gutter and must not reserve a native
+            // scroller column from the command rows.
+            scrollView.scrollerStyle = .overlay
+            scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            scrollView.hasVerticalScroller = false
+            scrollView.verticalScroller?.isHidden = true
+            scrollView.autohidesScrollers = true
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            scrollView.documentView?.postsFrameChangedNotifications = true
+
+            observations.append(NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] _ in
+                self?.publishMetrics()
+            })
+            if let documentView = scrollView.documentView {
+                observations.append(NotificationCenter.default.addObserver(
+                    forName: NSView.frameDidChangeNotification,
+                    object: documentView,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.publishMetrics()
+                })
+            }
+            publishMetrics()
+        }
+
+        func publishMetrics() {
+            guard let scrollView = observedScrollView else { return }
+            let viewportHeight = scrollView.contentView.bounds.height
+            let contentHeight = scrollView.documentView?.frame.height ?? viewportHeight
+            let contentOffset = max(0, scrollView.contentView.bounds.minY)
+            let metrics = PromptPaletteScrollMetrics(
+                contentHeight: contentHeight,
+                contentOffset: contentOffset)
+            DispatchQueue.main.async { [weak self] in
+                self?.onChange(metrics, viewportHeight)
+            }
+        }
+    }
+
+    func makeNSView(context: Context) -> MarkerView {
+        MarkerView(onChange: onChange)
+    }
+
+    func updateNSView(_ marker: MarkerView, context: Context) {
+        marker.onChange = onChange
+        marker.attachToScrollView()
+    }
+
+    let onChange: (PromptPaletteScrollMetrics, CGFloat) -> Void
+}
+
+private struct PromptPaletteScrollView<Content: View>: View {
+    let selectedID: UUID?
+    @ViewBuilder let content: () -> Content
+
+    @State private var metrics = PromptPaletteScrollMetrics()
+    @State private var viewportHeight: CGFloat = 0
+    @State private var indicatorIsVisible = false
+    @State private var didRevealInitially = false
+    @State private var fadeTask: Task<Void, Never>?
+
+    private var isScrollable: Bool {
+        metrics.contentHeight > viewportHeight + 1
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    content()
+                        .background {
+                            PromptPaletteScrollObserver { updated, measuredViewportHeight in
+                                updateMetrics(updated, viewportHeight: measuredViewportHeight)
                             }
-
-                        Divider().opacity(0.55)
-
-                        CommandTable(
-                            options: filteredOptions,
-                            query: query,
-                            selectedIndex: $selectedIndex,
-                            onPointerSelection: { index in
-                                let location = NSEvent.mouseLocation
-                                guard pointerTrackingStarted else { return }
-                                guard PromptPalettePointerPolicy.hasMoved(
-                                    from: pointerLocationAtKeyboardNavigation,
-                                    to: location
-                                ) else { return }
-                                pointerLocationAtKeyboardNavigation = nil
-                                selectedIndex = UInt(index)
-                            }) { option in
-                                activate(option)
-                            }
-                            .allowsHitTesting(!actionsArePresented)
-
-                        Divider().opacity(0.55)
-
-                        HStack(spacing: 16) {
-                            PaletteHint(keys: ["↑", "↓"], label: "Navigate")
-                            Spacer()
-                            if let selectedOption {
-                                Button {
-                                    activate(selectedOption)
-                                } label: {
-                                    if navigation.isAtRoot {
-                                        PaletteHint(
-                                            keys: ["↩"],
-                                            label: selectedOption.opensRoute ? "Open" : "Run")
-                                    } else {
-                                        PaletteLabelFirstHint(
-                                            label: selectedOption.opensRoute ? "Open" : "Run",
-                                            keys: ["↩"])
-                                    }
-                                }
-                                .promptPaletteFooterAction()
-
-                                if !navigation.isAtRoot {
-                                    Divider()
-                                        .frame(height: 18)
-                                        .opacity(0.45)
-                                }
-
-                                Button { toggleActions() } label: {
-                                    if navigation.isAtRoot {
-                                        PaletteHint(keys: ["⌘", "K"], label: "Actions")
-                                    } else {
-                                        PaletteLabelFirstHint(label: "Actions", keys: ["⌘", "K"])
-                                    }
-                                }
-                                .promptPaletteFooterAction(active: actionsArePresented)
-                            }
+                            .frame(width: 0, height: 0)
                         }
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 18)
-                        .frame(height: 48)
+                }
+                .scrollIndicators(.hidden)
+                .overlay(alignment: .trailing) {
+                    if isScrollable {
+                        scrollThumb
+                            .opacity(indicatorIsVisible ? 1 : 0)
+                            .animation(.easeOut(duration: 0.18), value: indicatorIsVisible)
                     }
-                    if actionsArePresented, let selectedOption {
-                        CommandActionsView(
-                            option: selectedOption,
-                            keyboard: keyboard,
-                            onPrimary: { activate(selectedOption) },
-                            onDismiss: dismissActions)
-                            .frame(width: 330)
-                            .padding(.trailing, 12)
-                            .padding(.bottom, 54)
-                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
-                            .zIndex(4)
+                }
+                .onAppear {
+                    viewportHeight = geometry.size.height
+                }
+                .onChange(of: geometry.size.height) { height in
+                    viewportHeight = height
+                    revealInitiallyIfNeeded()
+                }
+                .onChange(of: selectedID) { id in
+                    if let id {
+                        proxy.scrollTo(id)
                     }
                 }
             }
         }
-        .frame(maxWidth: 720)
-        .promptLiquidGlassSurface(
-            tint: backgroundColor.opacity(scheme == .dark ? 0.12 : 0.06),
-            cornerRadius: 28)
-        .padding()
-        .environment(\.colorScheme, scheme)
+        .padding(.vertical, 8)
+        .onDisappear {
+            fadeTask?.cancel()
+        }
+    }
+
+    private var scrollThumb: some View {
+        let availableHeight = max(0, viewportHeight - 12)
+        let proportionalHeight = availableHeight * viewportHeight / metrics.contentHeight
+        let thumbHeight = min(56, max(28, proportionalHeight))
+        let maximumOffset = max(1, metrics.contentHeight - viewportHeight)
+        let progress = min(1, max(0, metrics.contentOffset / maximumOffset))
+        let thumbOffset = progress * max(0, availableHeight - thumbHeight)
+
+        return ZStack(alignment: .topTrailing) {
+            Capsule()
+                .fill(Color.primary.opacity(0.48))
+                .frame(width: 4, height: thumbHeight)
+                .offset(y: 6 + thumbOffset)
+                .animation(.linear(duration: 0.08), value: thumbOffset)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .padding(.trailing, 4)
+        .allowsHitTesting(false)
+    }
+
+    private func revealInitiallyIfNeeded() {
+        guard isScrollable, !didRevealInitially else { return }
+        didRevealInitially = true
+        revealIndicator()
+    }
+
+    private func updateMetrics(_ updated: PromptPaletteScrollMetrics, viewportHeight: CGFloat) {
+        let didScroll = abs(updated.contentOffset - metrics.contentOffset) > 0.5
+        metrics = updated
+        self.viewportHeight = viewportHeight
+        if didScroll {
+            revealIndicator()
+        } else {
+            revealInitiallyIfNeeded()
+        }
+    }
+
+    private func revealIndicator() {
+        guard isScrollable else { return }
+        fadeTask?.cancel()
+        withAnimation(.easeOut(duration: 0.1)) {
+            indicatorIsVisible = true
+        }
+        fadeTask = Task {
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.28)) {
+                    indicatorIsVisible = false
+                }
+            }
+        }
+    }
+}
+
+struct PromptPalettePage<Content: View>: View {
+    @ObservedObject var store: PromptWorkspaceStore
+    @Binding var isPresented: Bool
+    var title: String?
+    @ViewBuilder let content: () -> Content
+
+    @EnvironmentObject private var navigator: PromptPaletteNavigator
+    @State private var query = ""
+    @State private var commands: [PromptRenderedCommand] = []
+    @State private var selectedID: UUID?
+    @State private var actionsArePresented = false
+    @State private var keyboardOwner = UUID()
+    @State private var pointerLocationAtKeyboardNavigation: CGPoint?
+    @State private var pointerTrackingStarted = false
+
+    private var selectedCommand: PromptRenderedCommand? {
+        commands.first { $0.presentation.id == selectedID } ?? commands.first
+    }
+
+    private var searchQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            VStack(alignment: .leading, spacing: 0) {
+                CommandPaletteQuery(
+                    query: $query,
+                    title: title,
+                    canGoBack: !navigator.path.isEmpty,
+                    onBack: goBack)
+
+                Divider().opacity(0.55)
+
+                PromptPaletteScrollView(selectedID: selectedID) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        content()
+                    }
+                    .padding(.horizontal, 10)
+                    .environment(\.promptPaletteQuery, searchQuery)
+                    .environment(\.promptPaletteSelection, selectedID)
+                    .environment(\.promptPaletteHover, pointerSelected)
+                }
+                .frame(maxHeight: 420)
+                .allowsHitTesting(!actionsArePresented)
+                .onPreferenceChange(PromptRenderedCommandsKey.self, perform: updateCommands)
+
+                Divider().opacity(0.55)
+                footer
+            }
+
+            if actionsArePresented, let selectedCommand, selectedCommand.presentation.hasActionMenu {
+                CommandActionsView(
+                    presentation: selectedCommand.presentation,
+                    keyboard: store.inputRouter,
+                    onPrimary: { activate(selectedCommand) },
+                    onDismiss: dismissActions)
+                    .frame(width: 330)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 54)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .bottomTrailing)))
+                    .zIndex(4)
+            }
+        }
         .onAppear {
             pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
             pointerTrackingStarted = true
-            claimCommandKeyboard()
-        }
-        .onChange(of: isPresented) { newValue in
-            if newValue {
-                pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-                pointerTrackingStarted = true
-            } else {
-                resetNavigationState()
-            }
+            claimKeyboard()
         }
         .onDisappear {
-            keyboard.release(owner: keyboardOwner)
-            resetNavigationState()
+            store.inputRouter.release(owner: keyboardOwner)
+        }
+        .onChange(of: query) { _ in
+            selectedID = commands.first?.presentation.id
         }
     }
 
-    private func activate(_ option: PromptCommandOption) {
+    private var footer: some View {
+        HStack(spacing: 4) {
+            PaletteHint(keys: ["↑", "↓"], label: "Navigate")
+            Spacer()
+            if let selectedCommand {
+                if selectedCommand.presentation.hasActionMenu {
+                    Button { toggleActions() } label: {
+                        PaletteLabelFirstHint(label: "Actions", keys: ["⌘", "K"])
+                    }
+                    .promptPaletteFooterAction(active: actionsArePresented)
+
+                    Divider().frame(height: 18).opacity(0.45)
+                }
+
+                Button { activate(selectedCommand) } label: {
+                    PaletteLabelFirstHint(
+                        label: selectedCommand.presentation.opensDestination ? "Open" : "Run",
+                        systemKeys: ["return"])
+                }
+                .promptPaletteFooterAction()
+            }
+        }
+        .font(.system(size: 11, weight: .medium))
+        .padding(.horizontal, 18)
+        .frame(height: 48)
+    }
+
+    private func updateCommands(_ updated: [PromptRenderedCommand]) {
+        let enabled = updated.filter(\.presentation.isEnabled)
+        commands = enabled
+        if let selectedID, enabled.contains(where: { $0.presentation.id == selectedID }) {
+            return
+        }
+        selectedID = enabled.first?.presentation.id
+    }
+
+    private func pointerSelected(_ id: UUID) {
+        let location = NSEvent.mouseLocation
+        guard pointerTrackingStarted,
+              PromptPalettePointerPolicy.hasMoved(
+                  from: pointerLocationAtKeyboardNavigation,
+                  to: location) else { return }
+        pointerLocationAtKeyboardNavigation = nil
+        selectedID = id
+    }
+
+    private func activate(_ command: PromptRenderedCommand) {
+        guard command.presentation.isEnabled else { return }
         actionsArePresented = false
-        switch option.behavior {
-        case .folder(let picker):
-            push(.folder(picker))
-        case .git(let picker):
-            push(.git(picker))
-        case .sidebar(let editor):
-            push(.sidebar(editor))
-        case .submenu(let children):
-            let childOptions = children()
-            push(.commands(title: option.title, options: childOptions))
-            rawQuery = ""
-            selectedIndex = 0
-        case .perform(let action):
+        if command.presentation.opensDestination {
+            command.activate()
+        } else {
             isPresented = false
-            action()
+            command.activate()
         }
     }
 
-    private func submitFromKeyboard() {
-        guard submitGate.begin(), let selectedOption else { return }
-        activate(selectedOption)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            submitGate.reset()
-        }
+    private func move(_ offset: Int) {
+        guard !commands.isEmpty else { return }
+        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+        let current = commands.firstIndex { $0.presentation.id == selectedID } ?? 0
+        selectedID = commands[(current + offset + commands.count) % commands.count].presentation.id
     }
 
-    private func claimCommandKeyboard() {
-        keyboard.claim(owner: keyboardOwner, acceptsTextInput: true) { command in
+    private func claimKeyboard() {
+        store.inputRouter.claim(owner: keyboardOwner, acceptsTextInput: true) { command in
             switch command {
-            case .moveUp:
-                moveSelectionUp()
-            case .moveDown:
-                moveSelectionDown()
+            case .moveUp: move(-1)
+            case .moveDown: move(1)
             case .submit:
-                submitFromKeyboard()
+                if let selectedCommand { activate(selectedCommand) }
             case .back:
                 if actionsArePresented {
                     actionsArePresented = false
-                } else if navigation.isAtRoot {
-                    isPresented = false
                 } else {
                     goBack()
                 }
-            case .actions:
-                toggleActions()
-            case .delete:
-                return false
-            case .textInput:
-                return false
+            case .actions: toggleActions()
+            case .delete, .textInput: return false
             }
             return true
         }
     }
 
-    private func moveSelectionUp() {
-        guard !filteredOptions.isEmpty else { return }
-        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-        let current = selectedIndex ?? UInt(filteredOptions.count)
-        selectedIndex = current == 0 ? UInt(filteredOptions.count - 1) : current - 1
-    }
-
-    private func moveSelectionDown() {
-        guard !filteredOptions.isEmpty else { return }
-        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-        let current = selectedIndex ?? UInt.max
-        selectedIndex = current >= UInt(filteredOptions.count - 1) ? 0 : current + 1
-    }
-
-    private func leaveFolderPicker() {
-        goBack()
-    }
-
-    private func leaveSidebarEditor() {
-        goBack()
-    }
-
-    private func resetNavigationState() {
-        pointerTrackingStarted = false
-        rawQuery = ""
-        selectedIndex = 0
-        navigation.reset()
-        returnStates.removeAll()
-        isRestoringReturnState = false
-        actionsArePresented = false
-        submitGate.reset()
+    private func goBack() {
+        if navigator.path.isEmpty {
+            isPresented = false
+        } else {
+            navigator.pop()
+        }
     }
 
     private func toggleActions() {
-        guard selectedOption != nil else { return }
+        guard selectedCommand?.presentation.hasActionMenu == true else { return }
         withAnimation(.easeOut(duration: 0.14)) {
             actionsArePresented.toggle()
         }
@@ -586,51 +810,6 @@ struct PromptCommandPaletteContentView: View {
 
     private func dismissActions() {
         actionsArePresented = false
-    }
-
-    private func goBack() {
-        guard navigation.pop() else { isPresented = false; return }
-        let returnState = returnStates.popLast()
-        isRestoringReturnState = true
-        rawQuery = returnState?.rawQuery ?? ""
-        selectedIndex = returnState?.selectedIndex
-        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
-        DispatchQueue.main.async {
-            isRestoringReturnState = false
-        }
-    }
-
-    private func push(_ route: PromptPaletteRoute) {
-        returnStates.append(PromptPaletteReturnState(
-            rawQuery: rawQuery,
-            selectedIndex: selectedIndex))
-        navigation.push(route)
-    }
-
-    /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
-    /// Returns 0 if no color name in the query matches, or if the color is nil.
-    private func colorMatchScore(for color: Color?, query: String) -> Double {
-        guard let color = color else { return 0 }
-
-        let queryLower = query.lowercased()
-        let nsColor = NSColor(color)
-
-        var bestScore: Double = 0
-        for name in NSColor.colorNames {
-            guard queryLower.contains(name),
-                  let systemColor = NSColor(named: name) else { continue }
-
-            let distance = nsColor.distance(to: systemColor)
-            // Max distance in weighted RGB space is ~3.0, so normalize and invert
-            // Use a threshold to determine "close enough" matches
-            let maxDistance: Double = 1.5
-            if distance < maxDistance {
-                let score = 1.0 - (distance / maxDistance)
-                bestScore = max(bestScore, score)
-            }
-        }
-
-        return bestScore
     }
 }
 
@@ -712,7 +891,7 @@ private struct PromptSidebarVisualEditor: View {
             }
             if actionsVisible, let session = selectedSession {
                 CommandActionsView(
-                    option: actionOption(session),
+                    presentation: actionPresentation(session),
                     keyboard: keyboard,
                     onPrimary: { store.focus(sessionID: session.id, paneID: session.focusedPaneID) },
                     onDismiss: dismissActions,
@@ -741,8 +920,10 @@ private struct PromptSidebarVisualEditor: View {
         }.buttonStyle(.plain).contextMenu { sessionMenu(session) }
     }
 
-    private func actionOption(_ session: PromptSession) -> PromptCommandOption {
-        PromptCommandOption(title: session.title, section: "Session", subtitle: (store.runtime.surface(for: session.focusedPaneID)?.workingDirectory ?? session.configuration.configuredDirectory)?.promptDisplayPath, description: "Sidebar session") {}
+    private func actionPresentation(_ session: PromptSession) -> PromptCommandPresentation {
+        PromptCommandPresentation(session.title)
+            .subtitle((store.runtime.surface(for: session.focusedPaneID)?.workingDirectory ?? session.configuration.configuredDirectory)?.promptDisplayPath)
+            .help("Sidebar session")
     }
 
     private func actionItems(_ session: PromptSession) -> [PromptCommandAction] {
@@ -844,6 +1025,49 @@ struct PromptGitPickerConfiguration {
     let locations: () async throws -> [PromptGitPickerEntry]
     let onSelect: (String) -> Void
     var emptyText = "No Git repositories found"
+}
+
+struct PromptFolderPickerDestination: View {
+    let configuration: PromptFolderPickerConfiguration
+    @Binding var isPresented: Bool
+    let keyboard: PromptInputRouter
+    @EnvironmentObject private var navigator: PromptPaletteNavigator
+
+    var body: some View {
+        FolderPickerView(
+            configuration: configuration,
+            isPresented: $isPresented,
+            keyboard: keyboard,
+            onBack: navigator.pop)
+    }
+}
+
+struct PromptGitPickerDestination: View {
+    let configuration: PromptGitPickerConfiguration
+    @Binding var isPresented: Bool
+    let keyboard: PromptInputRouter
+    @EnvironmentObject private var navigator: PromptPaletteNavigator
+
+    var body: some View {
+        GitPickerView(
+            configuration: configuration,
+            isPresented: $isPresented,
+            keyboard: keyboard,
+            onBack: navigator.pop)
+    }
+}
+
+struct PromptSidebarEditorDestination: View {
+    let store: PromptWorkspaceStore
+    let keyboard: PromptInputRouter
+    @EnvironmentObject private var navigator: PromptPaletteNavigator
+
+    var body: some View {
+        PromptSidebarVisualEditor(
+            store: store,
+            keyboard: keyboard,
+            onBack: navigator.pop)
+    }
 }
 
 enum PromptFolderPath {
@@ -1658,7 +1882,7 @@ private struct FolderPickerRow: View {
 }
 
 private struct CommandActionsView: View {
-    let option: PromptCommandOption
+    let presentation: PromptCommandPresentation
     let keyboard: PromptInputRouter
     let onPrimary: () -> Void
     let onDismiss: () -> Void
@@ -1672,11 +1896,11 @@ private struct CommandActionsView: View {
     private var actions: [PromptCommandAction] {
         if let customActions { return customActions }
         let primary = PromptCommandAction(
-            title: option.primaryActionTitle,
+            title: presentation.primaryActionTitle,
             icon: "return",
             shortcut: ["↩"],
             action: onPrimary)
-        return [primary] + (option.contextualActions?() ?? [])
+        return [primary] + (presentation.contextualActions?() ?? [])
     }
 
     private var filteredActions: [PromptCommandAction] {
@@ -1686,7 +1910,7 @@ private struct CommandActionsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(option.title)
+            Text(presentation.title)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -1874,69 +2098,9 @@ struct PromptPalettePointerPolicy {
     }
 }
 
-private struct CommandTable: View {
-    var options: [PromptCommandOption]
-    var query: String
-    @Binding var selectedIndex: UInt?
-    var onPointerSelection: (Int) -> Void
-    var action: (PromptCommandOption) -> Void
-
-    var body: some View {
-        if options.isEmpty {
-            Text("No matches")
-                .foregroundStyle(.secondary)
-                .padding()
-        } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(options.enumerated()), id: \.1.id) { index, option in
-                            if index == 0 || options[index - 1].section != option.section {
-                                Text(option.section.uppercased())
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .tracking(0.7)
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.top, index == 0 ? 4 : 13)
-                                    .padding(.bottom, 4)
-                            }
-                            CommandRow(
-                                option: option,
-                                query: query,
-                                isSelected: {
-                                    if let selected = selectedIndex {
-                                        return selected == index ||
-                                            (selected >= options.count &&
-                                                index == options.count - 1)
-                                    } else {
-                                        return false
-                                    }
-                                }(),
-                                onHover: {
-                                    onPointerSelection(index)
-                                }
-                            ) {
-                                action(option)
-                            }
-                        }
-                    }
-                    .padding(10)
-                }
-                .frame(maxHeight: 420)
-                .onChange(of: selectedIndex) { _ in
-                    guard let selectedIndex,
-                          selectedIndex < options.count else { return }
-                    proxy.scrollTo(
-                        options[Int(selectedIndex)].id)
-                }
-            }
-        }
-    }
-}
-
 /// A single row in the command palette.
 private struct CommandRow: View {
-    let option: PromptCommandOption
+    let presentation: PromptCommandPresentation
     var query: String
     var isSelected: Bool
     var onHover: () -> Void
@@ -1944,17 +2108,17 @@ private struct CommandRow: View {
 
     private var highlightedTitle: Text {
         guard !query.isEmpty,
-              let indices = option.title.promptMatchedIndices(for: query) else {
-            return Text(option.title)
-                .fontWeight(option.emphasis ? .medium : .regular)
+              let indices = presentation.title.promptMatchedIndices(for: query) else {
+            return Text(presentation.title)
+                .fontWeight(presentation.emphasis ? .medium : .regular)
         }
 
-        var attributed = AttributedString(option.title)
+        var attributed = AttributedString(presentation.title)
         attributed[attributed.startIndex...].font = .body
-            .weight(option.emphasis ? .medium : .regular)
+            .weight(presentation.emphasis ? .medium : .regular)
 
         for idx in indices {
-            let offset = option.title.distance(from: option.title.startIndex, to: idx)
+            let offset = presentation.title.distance(from: presentation.title.startIndex, to: idx)
             let attrStart = attributed.index(attributed.startIndex, offsetByCharacters: offset)
             let attrEnd = attributed.index(attrStart, offsetByCharacters: 1)
             attributed[attrStart ..< attrEnd].font = .body.bold()
@@ -1966,7 +2130,7 @@ private struct CommandRow: View {
 
     private func highlightedSubtitle(_ subtitle: String) -> Text {
         guard !query.isEmpty,
-              option.title.promptMatchedIndices(for: query) == nil,
+              presentation.title.promptMatchedIndices(for: query) == nil,
               let indices = subtitle.promptMatchedIndices(for: query) else {
             return Text(subtitle)
         }
@@ -1985,7 +2149,7 @@ private struct CommandRow: View {
     }
 
     private var fixedTrailingWidth: CGFloat {
-        let symbolCount = option.symbols?.count ?? 0
+        let symbolCount = presentation.symbols?.count ?? 0
         let symbolsWidth = symbolCount == 0 ? 0 : CGFloat(symbolCount * 13 + symbolCount - 1)
         let showsChevron = isSelected
         return symbolsWidth + (symbolCount > 0 && showsChevron ? 10 : 0) + (showsChevron ? 8 : 0)
@@ -1995,19 +2159,19 @@ private struct CommandRow: View {
         Button(action: action) {
             ZStack(alignment: .trailing) {
                 HStack(spacing: 12) {
-                    if let color = option.leadingColor {
+                    if let color = presentation.leadingColor {
                         Circle()
                             .fill(color)
                             .frame(width: 8, height: 8)
                     }
 
-                    if let icon = option.leadingIcon {
+                    if let icon = presentation.leadingIcon {
                         ZStack {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(Color.secondary.opacity(0.10))
                                 .frame(width: 34, height: 34)
                             Image(systemName: icon)
-                                .foregroundStyle(option.emphasis ? Color.accentColor : .secondary)
+                                .foregroundStyle(presentation.emphasis ? Color.accentColor : .secondary)
                                 .font(.system(size: 14, weight: .medium))
                         }
                     }
@@ -2015,7 +2179,7 @@ private struct CommandRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         highlightedTitle
 
-                        if let subtitle = option.subtitle {
+                        if let subtitle = presentation.subtitle {
                             highlightedSubtitle(subtitle)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -2024,7 +2188,7 @@ private struct CommandRow: View {
 
                     Spacer()
 
-                    if let badge = option.badge, !badge.isEmpty {
+                    if let badge = presentation.badge, !badge.isEmpty {
                         Text(badge)
                             .font(.caption2.weight(.medium))
                             .padding(.horizontal, 7)
@@ -2048,12 +2212,12 @@ private struct CommandRow: View {
                 .animation(.spring(response: 0.18, dampingFraction: 0.72), value: isSelected)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.accentColor.opacity(option.emphasis && !isSelected ? 0.3 : 0), lineWidth: 1.5)
+                        .strokeBorder(Color.accentColor.opacity(presentation.emphasis && !isSelected ? 0.3 : 0), lineWidth: 1.5)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
                 HStack(spacing: 10) {
-                    if let symbols = option.symbols {
+                    if let symbols = presentation.symbols {
                         ShortcutSymbolsView(symbols: symbols)
                             .foregroundStyle(.secondary)
                     }
@@ -2070,7 +2234,7 @@ private struct CommandRow: View {
             }
             .contentShape(Rectangle())
         }
-        .help(option.description ?? "")
+        .help(presentation.description ?? "")
         .buttonStyle(.plain)
         .onContinuousHover { phase in
             if case .active = phase { onHover() }
@@ -2085,11 +2249,7 @@ private struct PaletteHint: View {
     var body: some View {
         HStack(spacing: 5) {
             ForEach(keys, id: \.self) { key in
-                Text(key)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .padding(.horizontal, 5)
-                    .frame(minWidth: 22, minHeight: 22)
-                    .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
+                PaletteKeycap(key: key)
             }
             Text(label).foregroundStyle(.secondary)
         }
@@ -2105,11 +2265,7 @@ private struct PaletteLabelFirstHint: View {
         HStack(spacing: 5) {
             Text(label).foregroundStyle(.secondary)
             ForEach(keys, id: \.self) { key in
-                Text(key)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .padding(.horizontal, 5)
-                    .frame(minWidth: 22, minHeight: 22)
-                    .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
+                PaletteKeycap(key: key)
             }
             ForEach(systemKeys, id: \.self) { key in
                 Image(systemName: key)
@@ -2118,6 +2274,25 @@ private struct PaletteLabelFirstHint: View {
                     .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
             }
         }
+    }
+}
+
+private struct PaletteKeycap: View {
+    let key: String
+
+    var body: some View {
+        Group {
+            if key == "↩" {
+                Image(systemName: "return")
+                    .font(.system(size: 10, weight: .semibold))
+            } else {
+                Text(key)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+            }
+        }
+        .padding(.horizontal, 5)
+        .frame(minWidth: 22, minHeight: 22, alignment: .center)
+        .background(Color.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: 5))
     }
 }
 

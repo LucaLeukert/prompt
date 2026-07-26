@@ -2,6 +2,7 @@ import AppKit
 import OSLog
 import SwiftUI
 
+/// The root command palette and its declaratively composed destinations.
 struct PromptCommandPaletteView: View {
     @ObservedObject var store: PromptWorkspaceStore
     let surface: PromptTerminalSurface?
@@ -12,11 +13,18 @@ struct PromptCommandPaletteView: View {
             GeometryReader { geometry in
                 VStack {
                     Spacer().frame(height: geometry.size.height * 0.05)
-                    PromptCommandPaletteContentView(
-                        store: store,
-                        isPresented: $isPresented,
-                        backgroundColor: PromptTheme.elevated,
-                        options: commandOptions)
+                    PromptPaletteHost {
+                        PromptPalettePage(
+                            store: store,
+                            isPresented: $isPresented,
+                            title: nil,
+                            content: rootCommands)
+                    }
+                    .frame(maxWidth: 720)
+                    .promptLiquidGlassSurface(
+                        tint: PromptTheme.elevated.opacity(0.12),
+                        cornerRadius: 28)
+                    .padding()
                     Spacer()
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
@@ -25,62 +33,180 @@ struct PromptCommandPaletteView: View {
         }
     }
 
-    private var commandOptions: [PromptCommandOption] {
+    @ViewBuilder
+    private func rootCommands() -> some View {
         let directory = surface?.workingDirectory ?? NSHomeDirectory()
-        var options: [PromptCommandOption] = [
-            PromptCommandOption(
-                title: "Current directory",
-                section: "Create session",
-                subtitle: directory.promptDisplayPath,
-                description: "Open here, or press Command-K for another local session type",
-                symbols: ["⌘", "T"],
-                leadingIcon: "terminal",
-                primaryActionTitle: "Open shell in current directory",
-                contextualActions: {
-                    PromptSessionLauncher.currentDirectoryActions(store: store, directory: directory)
-                }) {
-                    store.createLocal(directory: directory)
-                },
-            PromptCommandOption(title: "Open folder…", section: "Create session", subtitle: "Choose a folder on this Mac", description: "Browse folders without leaving the palette", folderPicker: PromptSessionLauncher.localFolderPicker(store: store, at: directory), primaryActionTitle: "Browse local folders"),
-            PromptCommandOption(
-                title: "Git open…",
-                section: "Create session",
-                subtitle: "Repositories and registered worktrees",
-                description: "Browse Git locations, or press Command-K to create a worktree",
-                leadingIcon: "arrow.triangle.branch",
-                gitPicker: PromptSessionLauncher.gitPicker(store: store, at: directory),
-                primaryActionTitle: "Browse Git repositories",
-                contextualActions: {
-                    PromptSessionLauncher.gitActions(store: store, directory: directory)
-                }),
-            PromptCommandOption(title: "Container…", section: "Create session", subtitle: "Docker containers and Compose services", description: "Open an interactive shell in a container", leadingIcon: "shippingbox", primaryActionTitle: "Choose a container", children: {
-                PromptSessionLauncher.containerOptions(store: store, directory: directory)
-            }),
-            PromptCommandOption(title: "Remote session…", section: "Create session", subtitle: "SSH config and Tailscale", description: "Discover SSH hosts, pick a folder, and open a reconnectable session", leadingIcon: "network", primaryActionTitle: "Choose a remote host", children: {
-                PromptSessionLauncher.remoteOptions(store: store)
-            }),
-            PromptCommandOption(title: "Split right", section: "Actions", description: "Split the focused session horizontally", symbols: ["⌘", "D"], leadingIcon: "rectangle.split.2x1", primaryActionTitle: "Split focused session right") {
-                store.splitFocused(axis: .horizontal)
-            },
-            PromptCommandOption(title: "Split down", section: "Actions", description: "Split the focused session vertically", symbols: ["⇧", "⌘", "D"], leadingIcon: "rectangle.split.1x2", primaryActionTitle: "Split focused session down") {
-                store.splitFocused(axis: .vertical)
-            },
-            PromptCommandOption(title: "Close pane", section: "Actions", description: "Close the focused pane", symbols: ["⌘", "W"], leadingIcon: "xmark.rectangle", primaryActionTitle: "Close focused pane") {
-                store.closeFocusedPane()
-            },
-            PromptCommandOption(title: "Edit sidebar", section: "Sidebar", subtitle: "Arrange groups and sessions visually", description: "Drag, rename, group, and manage the sidebar", leadingIcon: "rectangle.3.group", sidebarEditor: store),
-            PromptCommandOption(title: "Sidebar layout…", section: "Sidebar", subtitle: store.sidebarLayout == .flat ? "Flat" : "Grouped", description: "Choose how sessions are organized", leadingIcon: "sidebar.left", primaryActionTitle: "Choose sidebar layout", children: {
-                [
-                    PromptCommandOption(title: "Flat", section: "Layout", description: "Show one continuous session list", leadingIcon: "list.bullet", primaryActionTitle: "Use flat sidebar layout") { store.sidebarLayout = .flat },
-                    PromptCommandOption(title: "Grouped", section: "Layout", description: "Nest sessions by machine or custom folder", leadingIcon: "list.bullet.indent", primaryActionTitle: "Use grouped sidebar layout") { store.sidebarLayout = .grouped },
-                ]
-            }),
-            PromptCommandOption(title: "Sort sessions…", section: "Sidebar", subtitle: store.sidebarSort.label, description: "Change sidebar ordering", leadingIcon: "arrow.up.arrow.down", primaryActionTitle: "Choose session sort order", children: {
-                PromptWorkspaceStore.SidebarSort.allCases.map { sort in
-                    PromptCommandOption(title: sort.label, section: "Sort sessions", description: sort.detail, leadingIcon: store.sidebarSort == sort ? "checkmark" : "circle", primaryActionTitle: "Sort sessions by \(sort.label.lowercased())") { store.sidebarSort = sort }
+        let containerCatalog = PromptSessionLauncher.containerCatalog(directory: directory)
+
+        PromptPaletteSection("Create session") {
+            PromptPaletteCommand("Current directory") {
+                store.createLocal(directory: directory)
+            }
+            .subtitle(directory.promptDisplayPath)
+            .help("Open here, or press Command-K for another local session type")
+            .shortcut("⌘", "T")
+            .icon("terminal")
+            .primaryAction("Open shell in current directory")
+            .actions {
+                PromptSessionLauncher.currentDirectoryActions(store: store, directory: directory)
+            }
+
+            PromptPaletteCommand("Open folder…")
+                .subtitle("Choose a folder on this Mac")
+                .help("Browse folders without leaving the palette")
+                .icon("folder.badge.plus")
+                .destination(title: "Browse local folders") {
+                    PromptFolderPickerDestination(
+                        configuration: PromptSessionLauncher.localFolderPicker(store: store, at: directory),
+                        isPresented: $isPresented,
+                        keyboard: store.inputRouter)
                 }
-            }),
-            PromptCommandOption(title: "New sidebar folder…", section: "Sidebar", description: "Create a custom session group", leadingIcon: "folder.badge.plus", primaryActionTitle: "Create sidebar folder", action: {
+                .primaryAction("Browse local folders")
+
+            PromptPaletteCommand("Git open…")
+                .subtitle("Repositories and registered worktrees")
+                .help("Browse Git locations, or press Command-K to create a worktree")
+                .icon("arrow.triangle.branch")
+                .destination(title: "Browse Git repositories") {
+                    PromptGitPickerDestination(
+                        configuration: PromptSessionLauncher.gitPicker(store: store, at: directory),
+                        isPresented: $isPresented,
+                        keyboard: store.inputRouter)
+                }
+                .actions {
+                    PromptSessionLauncher.gitActions(store: store, directory: directory)
+                }
+
+            PromptPaletteCommand("Container…")
+                .subtitle(
+                    containerCatalog.error == nil
+                        ? "Docker containers and Compose services"
+                        : "Docker is unavailable")
+                .help(
+                    containerCatalog.error == nil
+                        ? "Open an interactive shell in a container"
+                        : "Start Docker or Colima to enable container sessions")
+                .icon("shippingbox")
+                .destination(title: "Choose a container") {
+                    PromptPalettePage(
+                        store: store,
+                        isPresented: $isPresented,
+                        title: "Container",
+                        content: {
+                            PromptContainerCommands(
+                                store: store,
+                                directory: directory,
+                                catalog: containerCatalog)
+                        })
+                }
+                .enabled(containerCatalog.error == nil)
+
+            PromptPaletteCommand("Remote session…")
+                .subtitle("SSH config and Tailscale")
+                .help("Discover SSH hosts, pick a folder, and open a reconnectable session")
+                .icon("network")
+                .destination(title: "Choose a remote host") {
+                    PromptPalettePage(
+                        store: store,
+                        isPresented: $isPresented,
+                        title: "Remote session",
+                        content: {
+                            PromptRemoteCommands(
+                                store: store,
+                                isPresented: $isPresented)
+                        })
+                }
+        }
+
+        PromptPaletteSection("Actions") {
+            PromptPaletteCommand("Split right") {
+                store.splitFocused(axis: .horizontal)
+            }
+            .help("Split the focused session horizontally")
+            .shortcut("⌘", "D")
+            .icon("rectangle.split.2x1")
+            .primaryAction("Split focused session right")
+
+            PromptPaletteCommand("Split down") {
+                store.splitFocused(axis: .vertical)
+            }
+            .help("Split the focused session vertically")
+            .shortcut("⇧", "⌘", "D")
+            .icon("rectangle.split.1x2")
+            .primaryAction("Split focused session down")
+
+            PromptPaletteCommand("Close pane") {
+                store.closeFocusedPane()
+            }
+            .help("Close the focused pane")
+            .shortcut("⌘", "W")
+            .icon("xmark.rectangle")
+            .primaryAction("Close focused pane")
+        }
+
+        PromptPaletteSection("Sidebar") {
+            PromptPaletteCommand("Edit sidebar")
+                .subtitle("Arrange groups and sessions visually")
+                .help("Drag, rename, group, and manage the sidebar")
+                .icon("rectangle.3.group")
+                .destination(title: "Edit sidebar") {
+                    PromptSidebarEditorDestination(
+                        store: store,
+                        keyboard: store.inputRouter)
+                }
+
+            PromptPaletteCommand("Sidebar layout…")
+                .subtitle(store.sidebarLayout == .flat ? "Flat" : "Grouped")
+                .help("Choose how sessions are organized")
+                .icon("sidebar.left")
+                .destination(title: "Choose sidebar layout") {
+                    PromptPalettePage(
+                        store: store,
+                        isPresented: $isPresented,
+                        title: "Sidebar layout",
+                        content: {
+                            PromptPaletteSection("Layout") {
+                                PromptPaletteCommand("Flat") {
+                                    store.sidebarLayout = .flat
+                                }
+                                .help("Show one continuous session list")
+                                .icon("list.bullet")
+                                .primaryAction("Use flat sidebar layout")
+
+                                PromptPaletteCommand("Grouped") {
+                                    store.sidebarLayout = .grouped
+                                }
+                                .help("Nest sessions by machine or custom folder")
+                                .icon("list.bullet.indent")
+                                .primaryAction("Use grouped sidebar layout")
+                            }
+                        })
+                }
+
+            PromptPaletteCommand("Sort sessions…")
+                .subtitle(store.sidebarSort.label)
+                .help("Change sidebar ordering")
+                .icon("arrow.up.arrow.down")
+                .destination(title: "Choose session sort order") {
+                    PromptPalettePage(
+                        store: store,
+                        isPresented: $isPresented,
+                        title: "Sort sessions",
+                        content: {
+                            PromptPaletteSection("Sort sessions") {
+                                ForEach(PromptWorkspaceStore.SidebarSort.allCases, id: \.self) { sort in
+                                    PromptPaletteCommand(sort.label) {
+                                        store.sidebarSort = sort
+                                    }
+                                    .help(sort.detail)
+                                    .icon(store.sidebarSort == sort ? "checkmark" : "circle")
+                                    .primaryAction("Sort sessions by \(sort.label.lowercased())")
+                                }
+                            }
+                        })
+                }
+
+            PromptPaletteCommand("New sidebar folder…") {
                 let alert = NSAlert()
                 alert.messageText = "New sidebar folder"
                 alert.informativeText = "Choose a name for the session group."
@@ -91,29 +217,219 @@ struct PromptCommandPaletteView: View {
                 alert.addButton(withTitle: "Create")
                 alert.addButton(withTitle: "Cancel")
                 if alert.runModal() == .alertFirstButtonReturn { store.createSidebarFolder(named: field.stringValue) }
-            }),
-            PromptCommandOption(title: "Move session to folder…", section: "Sidebar", subtitle: store.sidebarFolders.isEmpty ? "Create a folder first" : nil, description: "Move the focused session into a custom group", leadingIcon: "folder", primaryActionTitle: "Choose destination folder", children: {
-                [PromptCommandOption(title: "Automatic (by machine)", section: "Folders", leadingIcon: "desktopcomputer", primaryActionTitle: "Group focused session automatically") { store.assignFocusedSession(to: nil) }]
-                    + store.sidebarFolders.map { folder in PromptCommandOption(title: folder, section: "Folders", leadingIcon: "folder", primaryActionTitle: "Move focused session to \(folder)") { store.assignFocusedSession(to: folder) } }
-            }),
-        ]
-        options.append(contentsOf: openSessionOptions)
-        options.append(contentsOf: PromptSessionLauncher.savedRemoteSessions.map { remote in
-            PromptCommandOption(title: remote.name, section: "Recent remote sessions", subtitle: remote.destination, description: "Attach to persistent session \(remote.session)", leadingIcon: "arrow.clockwise.circle", primaryActionTitle: "Reconnect to \(remote.name)") {
-                PromptSessionLauncher.open(remote, store: store)
             }
-        })
-        return options
-    }
+            .help("Create a custom session group")
+            .icon("folder.badge.plus")
+            .primaryAction("Create sidebar folder")
 
-    private var openSessionOptions: [PromptCommandOption] {
-        store.workspace.sessions.flatMap { session in
-            session.splitTree.panes.map { pane in
-                PromptCommandOption(title: pane.title.isEmpty ? session.title : pane.title, section: "Open sessions", subtitle: store.runtime.surface(for: pane.id)?.workingDirectory?.promptDisplayPath, description: "Focus this terminal", leadingIcon: "rectangle.on.rectangle", primaryActionTitle: "Focus \(pane.title.isEmpty ? session.title : pane.title)") {
-                    store.focus(sessionID: session.id, paneID: pane.id)
+            PromptPaletteCommand("Move session to folder…")
+                .subtitle(store.sidebarFolders.isEmpty ? "Create a folder first" : nil)
+                .help("Move the focused session into a custom group")
+                .icon("folder")
+                .destination(title: "Choose destination folder") {
+                    PromptPalettePage(
+                        store: store,
+                        isPresented: $isPresented,
+                        title: "Move session to folder",
+                        content: {
+                            PromptPaletteSection("Folders") {
+                                PromptPaletteCommand("Automatic (by machine)") {
+                                    store.assignFocusedSession(to: nil)
+                                }
+                                .icon("desktopcomputer")
+                                .primaryAction("Group focused session automatically")
+
+                                ForEach(store.sidebarFolders, id: \.self) { folder in
+                                    PromptPaletteCommand(folder) {
+                                        store.assignFocusedSession(to: folder)
+                                    }
+                                    .icon("folder")
+                                    .primaryAction("Move focused session to \(folder)")
+                                }
+                            }
+                        })
+                }
+        }
+
+        PromptPaletteSection("Open sessions") {
+            ForEach(store.workspace.sessions) { session in
+                ForEach(session.splitTree.panes) { pane in
+                    PromptPaletteCommand(pane.title.isEmpty ? session.title : pane.title) {
+                        store.focus(sessionID: session.id, paneID: pane.id)
+                    }
+                    .subtitle(store.runtime.surface(for: pane.id)?.workingDirectory?.promptDisplayPath)
+                    .help("Focus this terminal")
+                    .icon("rectangle.on.rectangle")
+                    .primaryAction("Focus \(pane.title.isEmpty ? session.title : pane.title)")
                 }
             }
         }
+
+        PromptPaletteSection("Recent remote sessions") {
+            ForEach(PromptSessionLauncher.savedRemoteSessions, id: \.self) { remote in
+                PromptPaletteCommand(remote.name) {
+                    PromptSessionLauncher.open(remote, store: store)
+                }
+                .subtitle(remote.directory?.promptDisplayPath ?? "Persistent session")
+                .help("Attach to persistent session \(remote.session)")
+                .icon("arrow.clockwise.circle")
+                .primaryAction("Reconnect to \(remote.name)")
+            }
+        }
+    }
+}
+
+private struct PromptContainerCommands: View {
+    let store: PromptWorkspaceStore
+    let directory: String
+    private let catalog: PromptSessionLauncher.ContainerCatalog
+
+    init(
+        store: PromptWorkspaceStore,
+        directory: String,
+        catalog: PromptSessionLauncher.ContainerCatalog? = nil
+    ) {
+        self.store = store
+        self.directory = directory
+        self.catalog = catalog ?? PromptSessionLauncher.containerCatalog(directory: directory)
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if let error = catalog.error {
+            PromptPaletteSection("Container") {
+                PromptPaletteCommand("Docker unavailable") {
+                    PromptSessionLauncher.show(error)
+                }
+                .subtitle(error.localizedDescription)
+                .help("Install or start Docker and try again")
+                .icon("exclamationmark.triangle")
+                .primaryAction("Show Docker error")
+            }
+        } else {
+            if !catalog.containers.isEmpty {
+                PromptPaletteSection("Docker containers") {
+                    ForEach(catalog.containers, id: \.id) { container in
+                        PromptPaletteCommand(container.name) {
+                            PromptSessionLauncher.open(
+                                container: container,
+                                store: store,
+                                directory: directory)
+                        }
+                        .subtitle("\(container.state) · \(container.id)")
+                        .help(
+                            container.state == "running"
+                                ? "Open /bin/sh in this container"
+                                : "Start this container before opening a shell")
+                        .icon(container.state == "running" ? "shippingbox" : "pause.circle")
+                        .primaryAction("Open \(container.name)")
+                        .enabled(container.state == "running")
+                    }
+                }
+            }
+
+            if !catalog.composeServices.isEmpty {
+                PromptPaletteSection("Docker Compose services") {
+                    ForEach(catalog.composeServices, id: \.self) { service in
+                        PromptPaletteCommand(service) {
+                            PromptSessionLauncher.open(
+                                composeService: service,
+                                store: store,
+                                directory: directory)
+                        }
+                        .subtitle(directory.promptDisplayPath)
+                        .help("Open /bin/sh in the running Compose service")
+                        .icon("square.3.layers.3d")
+                        .primaryAction("Open Compose service \(service)")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct PromptRemoteCommands: View {
+    let store: PromptWorkspaceStore
+    @Binding var isPresented: Bool
+    private let hosts: [PromptSessionLauncher.RemoteHost]
+
+    init(store: PromptWorkspaceStore, isPresented: Binding<Bool>) {
+        self.store = store
+        _isPresented = isPresented
+        hosts = PromptSessionLauncher.remoteHosts()
+    }
+
+    @ViewBuilder
+    var body: some View {
+        let configured = hosts.filter { !$0.isTailnet }
+        let tailnet = hosts.filter(\.isTailnet)
+
+        if !configured.isEmpty {
+            PromptPaletteSection("SSH hosts") {
+                ForEach(configured) { host in
+                    hostCommand(host)
+                }
+            }
+        }
+
+        if !tailnet.isEmpty {
+            PromptPaletteSection("Tailnet SSH hosts") {
+                ForEach(tailnet) { host in
+                    hostCommand(host)
+                }
+            }
+        }
+
+        if !configured.isEmpty {
+            PromptPaletteSection("SSH compatibility") {
+                ForEach(configured) { host in
+                    compatibilityCommand(host)
+                }
+            }
+        }
+
+        if !tailnet.isEmpty {
+            PromptPaletteSection("Tailnet SSH compatibility") {
+                ForEach(tailnet) { host in
+                    compatibilityCommand(host)
+                }
+            }
+        }
+    }
+
+    private func hostCommand(_ host: PromptSessionLauncher.RemoteHost) -> some View {
+        PromptPaletteCommand(host.title)
+            .subtitle(
+                host.isTailnet
+                    ? "Discovered through Tailscale · \(host.destination)"
+                    : "Native panes and inline AI")
+            .help("Open a controlled tmux session on \(host.destination)")
+            .icon(host.isTailnet ? "point.3.connected.trianglepath.dotted" : "network")
+            .destination(title: "Choose folder on \(host.title)") {
+                PromptFolderPickerDestination(
+                    configuration: PromptSessionLauncher.remoteFolderPicker(
+                        store: store,
+                        host: host.destination,
+                        transport: .controlMode),
+                    isPresented: $isPresented,
+                    keyboard: store.inputRouter)
+            }
+    }
+
+    private func compatibilityCommand(_ host: PromptSessionLauncher.RemoteHost) -> some View {
+        PromptPaletteCommand("\(host.title) · Legacy TTY")
+            .subtitle("Standard attached tmux client")
+            .help("Use when tmux control mode is unavailable")
+            .icon("network.slash")
+            .destination(title: "Choose legacy TTY folder on \(host.title)") {
+                PromptFolderPickerDestination(
+                    configuration: PromptSessionLauncher.remoteFolderPicker(
+                        store: store,
+                        host: host.destination,
+                        transport: .legacyTTY),
+                    isPresented: $isPresented,
+                    keyboard: store.inputRouter)
+            }
     }
 }
 
@@ -357,51 +673,6 @@ struct PromptRemoteSession: Codable, Hashable {
         }
     }
 
-    static func worktreeOptions(store: PromptWorkspaceStore, directory: String) -> [PromptCommandOption] {
-        do {
-            let worktrees = try PromptLocalSessionLauncher.worktrees(containing: directory)
-            let attach = worktrees.map { worktree in
-                PromptCommandOption(
-                    title: URL(fileURLWithPath: worktree.path).lastPathComponent,
-                    section: "Git worktrees",
-                    subtitle: [worktree.branch, worktree.path.promptDisplayPath].compactMap { $0 }.joined(separator: " · "),
-                    description: worktree.isMain ? "Main repository worktree" : "Attach without transferring ownership to Prompt",
-                    leadingIcon: worktree.isMain ? "folder" : "arrow.triangle.branch",
-                    primaryActionTitle: "Attach to \(worktree.path)",
-                    action: {
-                        let details = PromptLocalSessionDetails(
-                            repository: worktree.repository,
-                            branch: worktree.branch,
-                            worktreePath: worktree.path,
-                            worktreeOwnership: .external)
-                        _ = store.createLocal(
-                            directory: worktree.path,
-                            title: worktree.branch ?? URL(fileURLWithPath: worktree.path).lastPathComponent,
-                            behavior: .worktree,
-                            details: details)
-                    })
-            }
-            let create = PromptCommandOption(
-                title: "Create worktree…",
-                section: "Actions",
-                subtitle: URL(fileURLWithPath: worktrees.first?.repository ?? directory).lastPathComponent,
-                description: "Create a Prompt-owned worktree for a new branch",
-                leadingIcon: "plus",
-                primaryActionTitle: "Create Git worktree") {
-                    createWorktree(store: store, directory: worktrees.first?.repository ?? directory)
-                }
-            return attach + [create]
-        } catch {
-            return [PromptCommandOption(
-                title: "Git worktrees unavailable",
-                section: "Worktree",
-                subtitle: error.localizedDescription,
-                description: "Select a directory inside a Git repository",
-                leadingIcon: "exclamationmark.triangle",
-                primaryActionTitle: "Show worktree error") { show(error) }]
-        }
-    }
-
     static func createWorktree(store: PromptWorkspaceStore, directory: String) {
         guard let repository = PromptLocalSessionLauncher.gitRoot(containing: directory) else {
             show(PromptLocalSessionLauncher.LaunchError.failed("Select or open a directory inside a Git repository first."))
@@ -425,62 +696,59 @@ struct PromptRemoteSession: Codable, Hashable {
         } catch { show(error) }
     }
 
-    static func containerOptions(store: PromptWorkspaceStore, directory: String) -> [PromptCommandOption] {
+    struct ContainerCatalog {
+        let containers: [PromptLocalSessionLauncher.Container]
+        let composeServices: [String]
+        let error: Error?
+    }
+
+    static func containerCatalog(directory: String) -> ContainerCatalog {
         do {
             let containers = try PromptLocalSessionLauncher.containers()
-            let containerOptions = containers.map { container in
-                PromptCommandOption(
-                    title: container.name,
-                    section: "Docker containers",
-                    subtitle: "\(container.state) · \(container.id)",
-                    description: container.state == "running" ? "Open /bin/sh in this container" : "Start this container before opening a shell",
-                    leadingIcon: container.state == "running" ? "shippingbox" : "pause.circle",
-                    primaryActionTitle: "Open \(container.name)") {
-                        guard container.state == "running" else {
-                            show(PromptLocalSessionLauncher.LaunchError.failed("Container \(container.name) is \(container.state). Start it and try again."))
-                            return
-                        }
-                        let details = PromptLocalSessionDetails(container: container.name)
-                        _ = store.createLocal(
-                            directory: directory,
-                            command: PromptLocalSessionLauncher.containerCommand(identity: container.id),
-                            title: container.name,
-                            behavior: .container,
-                            details: details)
-                    }
-            }
             let services = (try? PromptLocalSessionLauncher.composeServices(directory: directory)) ?? []
-            let composeOptions = services.map { service in
-                PromptCommandOption(
-                    title: service,
-                    section: "Docker Compose services",
-                    subtitle: directory.promptDisplayPath,
-                    description: "Open /bin/sh in the running Compose service",
-                    leadingIcon: "square.3.layers.3d",
-                    primaryActionTitle: "Open Compose service \(service)",
-                    action: {
-                        let details = PromptLocalSessionDetails(composeService: service)
-                        _ = store.createLocal(
-                            directory: directory,
-                            command: PromptLocalSessionLauncher.composeCommand(service: service),
-                            title: service,
-                            behavior: .container,
-                            details: details)
-                    })
-            }
-            if containerOptions.isEmpty && composeOptions.isEmpty {
+            if containers.isEmpty && services.isEmpty {
                 throw PromptLocalSessionLauncher.LaunchError.failed("Docker is available, but no containers or Compose services were found.")
             }
-            return containerOptions + composeOptions
+            return ContainerCatalog(
+                containers: containers,
+                composeServices: services,
+                error: nil)
         } catch {
-            return [PromptCommandOption(
-                title: "Docker unavailable",
-                section: "Container",
-                subtitle: error.localizedDescription,
-                description: "Install or start Docker and try again",
-                leadingIcon: "exclamationmark.triangle",
-                primaryActionTitle: "Show Docker error") { show(error) }]
+            return ContainerCatalog(containers: [], composeServices: [], error: error)
         }
+    }
+
+    static func open(
+        container: PromptLocalSessionLauncher.Container,
+        store: PromptWorkspaceStore,
+        directory: String
+    ) {
+        guard container.state == "running" else {
+            show(PromptLocalSessionLauncher.LaunchError.failed(
+                "Container \(container.name) is \(container.state). Start it and try again."))
+            return
+        }
+        let details = PromptLocalSessionDetails(container: container.name)
+        store.createLocal(
+            directory: directory,
+            command: PromptLocalSessionLauncher.containerCommand(identity: container.id),
+            title: container.name,
+            behavior: .container,
+            details: details)
+    }
+
+    static func open(
+        composeService: String,
+        store: PromptWorkspaceStore,
+        directory: String
+    ) {
+        let details = PromptLocalSessionDetails(composeService: composeService)
+        store.createLocal(
+            directory: directory,
+            command: PromptLocalSessionLauncher.composeCommand(service: composeService),
+            title: composeService,
+            behavior: .container,
+            details: details)
     }
 
     static func createPrivileged(store: PromptWorkspaceStore, directory: String) {
@@ -499,13 +767,20 @@ struct PromptRemoteSession: Codable, Hashable {
             behavior: .privileged)
     }
 
-    private static func show(_ error: Error) {
+    static func show(_ error: Error) {
         let alert = NSAlert(error: error)
         alert.runModal()
     }
 
     static var savedRemoteSessions: [PromptRemoteSession] {
-        PromptSettings.shared.value(forKey: savedKey) ?? []
+        uniqueRemoteSessions(PromptSettings.shared.value(forKey: savedKey) ?? [])
+    }
+
+    /// History is ordered newest-first. A host can have many UUID-backed tmux
+    /// sessions, but the reconnect picker only needs its most recent one.
+    static func uniqueRemoteSessions(_ sessions: [PromptRemoteSession]) -> [PromptRemoteSession] {
+        var seenHosts: Set<String> = []
+        return sessions.filter { seenHosts.insert($0.destination.lowercased()).inserted }
     }
 
     static func refreshTailnetDiscovery() {
@@ -531,27 +806,30 @@ struct PromptRemoteSession: Codable, Hashable {
             })
     }
 
-    static func remoteOptions(store: PromptWorkspaceStore) -> [PromptCommandOption] {
+    struct RemoteHost: Identifiable {
+        let title: String
+        let destination: String
+        let isTailnet: Bool
+
+        var id: String { destination }
+    }
+
+    static func remoteHosts() -> [RemoteHost] {
         let configuredHosts = Set(savedRemoteSessions.map(\.destination) + sshConfigHosts)
         let tailnetHosts = Set(discoverTailnetSSHHosts())
-        let configured = configuredHosts.compactMap { host -> (title: String, destination: String, isTailnet: Bool)? in
+        let configured = configuredHosts.compactMap { host -> RemoteHost? in
             guard !tailnetHosts.contains(where: { tailnetHost($0, matchesSSHHost: host) }) else { return nil }
-            return (host, host, false)
+            return RemoteHost(title: host, destination: host, isTailnet: false)
         }
         let discovered = tailnetHosts.map { destination in
             let title = destination.split(separator: ".").first.map(String.init) ?? destination
-            return (title: title, destination: destination, isTailnet: true)
+            return RemoteHost(title: title, destination: destination, isTailnet: true)
         }
         let hosts = (configured + discovered).sorted {
             $0.title.localizedStandardCompare($1.title) == .orderedAscending
         }
         prefetchRemoteHomeDirectories(hosts.map(\.destination))
-        return hosts.flatMap { host in
-            [
-                PromptCommandOption(title: host.title, section: host.isTailnet ? "Tailnet SSH hosts" : "SSH hosts", subtitle: host.isTailnet ? "Discovered through Tailscale · \(host.destination)" : "Native panes and inline AI", description: "Open a controlled tmux session on \(host.destination)", leadingIcon: host.isTailnet ? "point.3.connected.trianglepath.dotted" : "network", folderPicker: remoteFolderPicker(store: store, host: host.destination, transport: .controlMode), primaryActionTitle: "Choose folder on \(host.title)"),
-                PromptCommandOption(title: "\(host.title) · Legacy TTY", section: host.isTailnet ? "Tailnet SSH compatibility" : "SSH compatibility", subtitle: "Standard attached tmux client", description: "Use when tmux control mode is unavailable", leadingIcon: "network.slash", folderPicker: remoteFolderPicker(store: store, host: host.destination, transport: .legacyTTY), primaryActionTitle: "Choose legacy TTY folder on \(host.title)"),
-            ]
-        }
+        return hosts
     }
 
     /// MagicDNS commonly exposes `pi.tailnet-name.ts.net` while ~/.ssh/config
@@ -725,7 +1003,7 @@ struct PromptRemoteSession: Codable, Hashable {
         return process.terminationStatus == 0
     }
 
-    private static func remoteFolderPicker(
+    static func remoteFolderPicker(
         store: PromptWorkspaceStore,
         host: String,
         transport: PromptRemoteTransport = .controlMode
@@ -801,7 +1079,9 @@ struct PromptRemoteSession: Codable, Hashable {
     }
 
     private static func remember(_ descriptor: PromptRemoteSession) {
-        var values = savedRemoteSessions.filter { $0.destination != descriptor.destination || $0.session != descriptor.session }
+        var values = savedRemoteSessions.filter {
+            $0.destination.caseInsensitiveCompare(descriptor.destination) != .orderedSame
+        }
         values.insert(descriptor, at: 0)
         PromptSettings.shared.set(Array(values.prefix(12)), forKey: savedKey)
     }

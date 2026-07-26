@@ -111,6 +111,19 @@ struct PromptAITests {
         #expect(PromptSessionLauncher.isSafeSession(second))
     }
 
+    @Test @MainActor func recentRemoteSessionsKeepOnlyTheNewestSessionPerHost() {
+        let sessions = [
+            PromptRemoteSession(destination: "pi.tailnet.ts.net", name: "pi.tailnet.ts.net", session: "new", directory: "/srv/new"),
+            PromptRemoteSession(destination: "build", name: "build", session: "build", directory: "/work"),
+            PromptRemoteSession(destination: "PI.TAILNET.TS.NET", name: "pi.tailnet.ts.net", session: "old", directory: "/srv/old"),
+        ]
+
+        let unique = PromptSessionLauncher.uniqueRemoteSessions(sessions)
+
+        #expect(unique.map(\.session) == ["new", "build"])
+        #expect(unique.first?.directory == "/srv/new")
+    }
+
     @Test @MainActor func tailnetDiscoveryKeepsOnlinePeersWithReachableSSH() {
         let json = #"""
         {
