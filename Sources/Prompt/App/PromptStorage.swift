@@ -1,4 +1,5 @@
 import Foundation
+import Logging
 
 /// The single home for Prompt-owned files.
 ///
@@ -45,7 +46,13 @@ final class PromptSettings {
     ) {
         self.paths = paths
         self.fileManager = fileManager
-        try? paths.prepare(fileManager: fileManager)
+        do {
+            try paths.prepare(fileManager: fileManager)
+        } catch {
+            PromptLog.persistence.error(
+                "Could not prepare Prompt storage",
+                metadata: ["error": "\(error)"])
+        }
         if fileManager.fileExists(atPath: paths.settings.path) {
             if let data = try? Data(contentsOf: paths.settings),
                let decoded = try? JSONDecoder().decode([String: JSONValue].self, from: data) {
@@ -57,6 +64,7 @@ final class PromptSettings {
                 // but writes remain disabled until the file is repaired.
                 values = [:]
                 canPersist = false
+                PromptLog.persistence.error("Configuration exists but could not be decoded; writes are disabled")
             }
         } else {
             values = [:]
@@ -87,6 +95,9 @@ final class PromptSettings {
             try data.write(to: paths.settings, options: [.atomic])
             return true
         } catch {
+            PromptLog.persistence.error(
+                "Could not persist configuration",
+                metadata: ["error": "\(error)"])
             return false
         }
     }

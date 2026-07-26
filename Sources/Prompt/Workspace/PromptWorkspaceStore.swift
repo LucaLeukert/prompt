@@ -56,10 +56,21 @@ final class PromptWorkspaceStore: ObservableObject {
             environment: environment,
             behavior: behavior,
             details: details))
-        guard runtime.createSurface(for: pane, configuration: config) != nil else { return nil }
+        guard runtime.createSurface(for: pane, configuration: config) != nil else {
+            PromptLog.sessions.error(
+                "Local terminal surface creation failed",
+                metadata: ["behavior": "\(behavior.rawValue)"])
+            return nil
+        }
         resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
         let session = PromptSession(title: title ?? pane.title, configuration: config, rootPane: pane)
         updateWorkspace { $0.append(session) }
+        PromptLog.sessions.info(
+            "Created local session",
+            metadata: [
+                "behavior": "\(behavior.rawValue)",
+                "session_id": "\(session.id.uuidString)",
+            ])
         return session
     }
 
@@ -72,10 +83,21 @@ final class PromptWorkspaceStore: ObservableObject {
         }
         let pane = PromptPane(title: title ?? config.destination)
         let sessionConfig = PromptSessionConfiguration.remote(config)
-        guard runtime.createSurface(for: pane, configuration: sessionConfig) != nil else { return nil }
+        guard runtime.createSurface(for: pane, configuration: sessionConfig) != nil else {
+            PromptLog.sessions.error(
+                "Remote terminal surface creation failed",
+                metadata: ["transport": "\(config.transport.rawValue)"])
+            return nil
+        }
         resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
         let session = PromptSession(title: title ?? config.destination, configuration: sessionConfig, rootPane: pane)
         updateWorkspace { $0.append(session) }
+        PromptLog.sessions.info(
+            "Created remote session",
+            metadata: [
+                "session_id": "\(session.id.uuidString)",
+                "transport": "\(config.transport.rawValue)",
+            ])
         return session
     }
 
@@ -173,6 +195,12 @@ final class PromptWorkspaceStore: ObservableObject {
 
     func closeSession(_ id: PromptSession.ID) {
         guard let session = workspace.sessions.first(where: { $0.id == id }) else { return }
+        PromptLog.sessions.info(
+            "Closing session",
+            metadata: [
+                "pane_count": "\(session.splitTree.panes.count)",
+                "session_id": "\(id.uuidString)",
+            ])
         updateWorkspace { _ = $0.removeSession(id: id) }
         focusCurrentSession()
         session.splitTree.panes.forEach { closeRuntimePane($0.id) }
@@ -267,7 +295,11 @@ final class PromptWorkspaceStore: ObservableObject {
         if configuration.behavior == .scratch,
            let directory = configuration.details?.scratchDirectory {
             do { try PromptLocalSessionLauncher.cleanupScratchDirectory(directory) }
-            catch { NSLog("Prompt scratch cleanup interrupted: %@", error.localizedDescription) }
+            catch {
+                PromptLog.sessions.error(
+                    "Scratch cleanup failed",
+                    metadata: ["error": "\(error)"])
+            }
         }
         if configuration.behavior == .worktree,
            configuration.details?.worktreeOwnership == .prompt,
@@ -279,7 +311,11 @@ final class PromptWorkspaceStore: ObservableObject {
                 branch: configuration.details?.branch,
                 isMain: false)
             do { try PromptLocalSessionLauncher.removePromptWorktree(worktree, ownership: .prompt) }
-            catch { NSLog("Prompt worktree cleanup interrupted: %@", error.localizedDescription) }
+            catch {
+                PromptLog.sessions.error(
+                    "Worktree cleanup failed",
+                    metadata: ["error": "\(error)"])
+            }
         }
     }
 

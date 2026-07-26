@@ -1,5 +1,5 @@
 import AppKit
-import OSLog
+import Logging
 import SwiftUI
 
 /// The root command palette and its declaratively composed destinations.
@@ -477,7 +477,7 @@ struct PromptRemoteSession: Codable, Hashable {
         }
     }
 
-    private static let logger = Logger(subsystem: "net.leukert.prompt", category: "tailnet-discovery")
+    private static var logger: Logger { PromptLog.tailnet }
     private static let savedKey = "PromptPersistentRemoteSessions"
     private static let tailnetSavedKey = "PromptDiscoveredTailnetHosts"
     private static let gitLocationsCacheFileName = "git-locations.json"
@@ -768,6 +768,9 @@ struct PromptRemoteSession: Codable, Hashable {
     }
 
     static func show(_ error: Error) {
+        PromptLog.commandPalette.error(
+            "Command palette action failed",
+            metadata: ["error": "\(error)"])
         let alert = NSAlert(error: error)
         alert.runModal()
     }
@@ -950,7 +953,9 @@ struct PromptRemoteSession: Codable, Hashable {
             process.standardOutput = output
             process.standardError = error
             do { try process.run() } catch {
-                logger.error("Failed to run Tailscale at \(executable.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error(
+                    "Failed to run Tailscale",
+                    metadata: ["error": "\(error)", "tool": "\(executable.lastPathComponent)"])
                 continue
             }
             let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -958,7 +963,13 @@ struct PromptRemoteSession: Codable, Hashable {
             process.waitUntilExit()
             guard process.terminationStatus == 0 else {
                 let message = String(data: errorData, encoding: .utf8) ?? ""
-                logger.error("Tailscale status attempt \(attempt) exited with \(process.terminationStatus): \(message, privacy: .public)")
+                logger.error(
+                    "Tailscale status attempt failed",
+                    metadata: [
+                        "attempt": "\(attempt)",
+                        "exit_code": "\(process.terminationStatus)",
+                        "message": "\(message)",
+                    ])
                 continue
             }
             let hosts = tailnetSSHHosts(from: data, isSSHReachable: sshPortIsReachable)
@@ -969,7 +980,12 @@ struct PromptRemoteSession: Codable, Hashable {
             }
             tailnetCache = (Date(), hosts)
             PromptSettings.shared.set(hosts, forKey: tailnetSavedKey)
-            logger.info("Tailscale status returned \(data.count) bytes and \(hosts.count) SSH candidates: \(hosts.joined(separator: ","), privacy: .public)")
+            logger.info(
+                "Tailscale status returned SSH candidates",
+                metadata: [
+                    "candidate_count": "\(hosts.count)",
+                    "response_bytes": "\(data.count)",
+                ])
             return hosts
         }
         logger.error("Tailscale status produced no usable peers after three attempts; retaining \(lastSuccessfulHosts.count) previously discovered hosts")

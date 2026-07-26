@@ -253,6 +253,12 @@ enum PromptLocalSessionLauncher {
         process.standardOutput = output
         process.standardError = error
         do { try process.run() } catch {
+            PromptLog.sessions.error(
+                "Could not start external tool",
+                metadata: [
+                    "error": "\(error)",
+                    "tool": "\(URL(fileURLWithPath: executable).lastPathComponent)",
+                ])
             throw LaunchError.unavailableTool(URL(fileURLWithPath: executable).lastPathComponent)
         }
         process.waitUntilExit()
@@ -261,6 +267,12 @@ enum PromptLocalSessionLauncher {
         guard process.terminationStatus == 0 else {
             let stderr = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            PromptLog.sessions.warning(
+                "External tool exited unsuccessfully",
+                metadata: [
+                    "exit_code": "\(process.terminationStatus)",
+                    "tool": "\(URL(fileURLWithPath: executable).lastPathComponent)",
+                ])
             throw LaunchError.failed(stderr.isEmpty ? "Command failed with exit code \(process.terminationStatus)." : stderr)
         }
         return stdout

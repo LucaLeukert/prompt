@@ -1,11 +1,11 @@
 import AppKit
 import Combine
+import Logging
 import SwiftUI
-import OSLog
 
 @MainActor
 final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
-    static let logger = Logger(subsystem: "net.leukert.prompt", category: "application")
+    static var logger: Logger { PromptLog.application }
 
     let runtime = PromptTerminalRuntime()
     lazy var workspaceStore = PromptWorkspaceStore(runtime: runtime)
@@ -16,6 +16,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     private var isPersistingRestorationState = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Self.logger.info("Application finished launching")
         installMainMenu()
         restoreOrCreateWorkspace()
         PromptSessionLauncher.refreshTailnetDiscovery()
@@ -44,6 +45,7 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        Self.logger.info("Application will terminate")
         persistRestorationState()
         tickTimer?.invalidate()
     }
@@ -136,8 +138,12 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             workspaceStore.workspace = restored
+            Self.logger.info(
+                "Restored workspace",
+                metadata: ["session_count": "\(restored.sessions.count)"])
         }
         if workspaceStore.workspace.sessions.isEmpty {
+            Self.logger.info("Creating initial local session")
             workspaceStore.createLocal(directory: FileManager.default.homeDirectoryForCurrentUser.path)
         }
         let controller = PromptWindowController(store: workspaceStore)

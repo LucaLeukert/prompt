@@ -2349,6 +2349,9 @@ final class CodexAppServer {
         }
         process.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
+                PromptLog.application.warning(
+                    "AI app server exited",
+                    metadata: ["service": "\(self?.service ?? "unknown")"])
                 #if DEBUG
                     if let self { PromptAIDebug.emit(self.service, "error", "app-server exited") }
                 #endif
@@ -2361,6 +2364,12 @@ final class CodexAppServer {
                 PromptAIDebug.emit(service, "state", "app-server launched · pid \(process.processIdentifier)")
             #endif
         } catch {
+            PromptLog.application.error(
+                "AI app server launch failed",
+                metadata: [
+                    "error": "\(error)",
+                    "service": "\(service)",
+                ])
             #if DEBUG
                 PromptAIDebug.emit(service, "error", "launch failed: \(error.localizedDescription)")
             #endif

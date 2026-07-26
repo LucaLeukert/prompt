@@ -22,6 +22,9 @@ packages:
   SwiftMath:
     url: https://github.com/mgriebling/SwiftMath.git
     exactVersion: 1.7.3
+  SwiftLog:
+    url: https://github.com/apple/swift-log.git
+    from: 1.6.0
 
 settings:
   base:
@@ -64,6 +67,8 @@ targets:
       - package: MarkdownUI
       - package: Sparkle
       - package: SwiftMath
+      - package: SwiftLog
+        product: Logging
       - sdk: Carbon.framework
       - sdk: libc++.tbd
     settings:
