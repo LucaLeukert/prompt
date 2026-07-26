@@ -714,12 +714,12 @@ final class PromptModelTests: XCTestCase {
             for: pane,
             configuration: .local(.init(workingDirectory: NSHomeDirectory()))))
 
-        surface.sendText("cd \(root.path)")
+        // Emit OSC 7 explicitly so the integration test exercises Prompt's
+        // directory handling without depending on the runner's shell profile.
+        surface.sendText("cd \(root.path) && printf '\\033]7;file://localhost%s\\007' \"$PWD\"")
         PromptController.pressReturn(on: surface)
 
-        // Fresh CI runners can take several seconds to start the shell and
-        // deliver the first OSC 7 working-directory update.
-        let deadline = ContinuousClock.now + .seconds(10)
+        let deadline = ContinuousClock.now + .seconds(5)
         while surface.workingDirectory != root.path, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
