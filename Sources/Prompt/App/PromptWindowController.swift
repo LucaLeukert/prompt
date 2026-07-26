@@ -384,6 +384,7 @@ private struct PromptSessionSidebar: View {
 private struct PromptSidebarSessionRow: View {
     @ObservedObject var store: PromptWorkspaceStore
     @ObservedObject private var runtime: PromptTerminalRuntime
+    @ObservedObject private var paneHitRegions: PromptPaneHitRegionRegistry
     @ObservedObject private var promptModel = PromptModel.shared
     let session: PromptSession
     let shortcut: Int?
@@ -396,6 +397,7 @@ private struct PromptSidebarSessionRow: View {
     init(store: PromptWorkspaceStore, session: PromptSession, shortcut: Int?, grouped: Bool) {
         self.store = store
         self.runtime = store.runtime
+        self.paneHitRegions = store.runtime.paneHitRegions
         self.session = session
         self.shortcut = shortcut
         self.grouped = grouped
@@ -507,27 +509,34 @@ private struct PromptSidebarSessionRow: View {
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
 
-            if pullRequest != nil || shortcut != nil {
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    if let pullRequest {
-                        Link(destination: pullRequest.url) {
-                            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                                Image(systemName: "arrow.triangle.pull")
-                                    .font(.system(size: 9, weight: .semibold))
-                                Text("\(pullRequest.number)")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            }
-                            .foregroundStyle(pullRequestColor)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("\(pullRequest.title) · Open on GitHub")
-                    }
-                    if let shortcut { shortcutLabel }
+            HStack(alignment: .center, spacing: 7) {
+                if session.splitTree.paneCount > 1 {
+                    PromptSidebarLayoutIndicator(
+                        tree: session.splitTree,
+                        focusedPaneID: session.focusedPaneID,
+                        paneFrames: paneHitRegions.frames)
+                        .frame(width: 20, height: 14)
+                        .help("Current pane layout")
                 }
-                .padding(.trailing, 8)
-                .padding(.top, 8)
+
+                if let pullRequest {
+                    Link(destination: pullRequest.url) {
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Image(systemName: "arrow.triangle.pull")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("\(pullRequest.number)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        }
+                        .foregroundStyle(pullRequestColor)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(pullRequest.title) · Open on GitHub")
+                }
+                if let shortcut { shortcutLabel }
             }
+            .padding(.trailing, 8)
+            .padding(.top, 7)
         }
         .onHover {
             hovering = $0
@@ -642,11 +651,12 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var headerAccessoryInset: CGFloat {
+        let layoutInset: CGFloat = session.splitTree.paneCount > 1 ? 32 : 0
         switch (pullRequest != nil, shortcut != nil) {
-        case (true, true): return 50
-        case (true, false): return 24
-        case (false, true): return 24
-        case (false, false): return 0
+        case (true, true): return layoutInset + 50
+        case (true, false): return layoutInset + 24
+        case (false, true): return layoutInset + 24
+        case (false, false): return layoutInset
         }
     }
 
@@ -731,17 +741,180 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var metadataLine: some View {
-        HStack(spacing: 5) {
-            Text(metadata)
-                .font(.system(size: 10, design: .monospaced))
-                .lineLimit(1)
-            let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
-            if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
-        }.foregroundStyle(.tertiary)
+        Text(metadata)
+            .font(.system(size: 10, design: .monospaced))
+            .lineLimit(1)
+            .foregroundStyle(.tertiary)
     }
 
     private func abbreviated(_ path: String) -> String {
         path.promptDisplayPath
+    }
+}
+
+private struct PromptSidebarLayoutIndicator: View {
+    let tree: PromptSplitTree
+    let focusedPaneID: PromptPane.ID
+    let paneFrames: [PromptPane.ID: CGRect]
+
+    private let gap: CGFloat = 2.5
+    private let cornerRadius: CGFloat = 1
+    private let minimumChipExtent: CGFloat = 3
+
+    var body: some View {
+        Canvas { context, size in
+            let bounds = CGRect(origin: .zero, size: size)
+            let panes = livePaneRects(in: bounds) ?? paneRects(tree, in: bounds)
+
+            for pane in panes {
+                let isFocused = pane.id == focusedPaneID
+                let chip = readableChip(for: pane.rect, in: bounds)
+                let path = Path(roundedRect: chip, cornerRadius: cornerRadius)
+
+                context.fill(
+                    path,
+                    with: .color(Color.white.opacity(isFocused ? 0.62 : 0.12)))
+                context.stroke(
+                    path,
+                    with: .color(Color.white.opacity(isFocused ? 0.85 : 0.22)),
+                    lineWidth: isFocused ? 0.75 : 0.5)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(
+            "Pane layout, \(tree.paneCount) panes, focused pane \(focusedPaneNumber)")
+    }
+
+    private var focusedPaneNumber: Int {
+        (tree.panes.firstIndex(where: { $0.id == focusedPaneID }) ?? 0) + 1
+    }
+
+    private func readableChip(for paneRect: CGRect, in bounds: CGRect) -> CGRect {
+        let available = bounds.insetBy(dx: gap / 2, dy: gap / 2)
+        let width = min(max(paneRect.width - gap, minimumChipExtent), available.width)
+        let height = min(max(paneRect.height - gap, minimumChipExtent), available.height)
+        let x = min(
+            max(paneRect.midX - width / 2, available.minX),
+            available.maxX - width)
+        let y = min(
+            max(paneRect.midY - height / 2, available.minY),
+            available.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func livePaneRects(
+        in bounds: CGRect
+    ) -> [(id: PromptPane.ID, rect: CGRect)]? {
+        let panes = tree.panes
+        let live = panes.compactMap { pane -> (PromptPane.ID, CGRect)? in
+            guard let frame = paneFrames[pane.id],
+                  frame.width > 0,
+                  frame.height > 0 else { return nil }
+            return (pane.id, frame)
+        }
+        guard live.count == panes.count,
+              var union = live.first?.1 else { return nil }
+        for (_, frame) in live.dropFirst() {
+            union = union.union(frame)
+        }
+        guard union.width > 0, union.height > 0 else { return nil }
+
+        return live.map { id, frame in
+            let x = bounds.minX + ((frame.minX - union.minX) / union.width) * bounds.width
+            // AppKit window coordinates rise from the bottom; Canvas
+            // coordinates rise from the top.
+            let y = bounds.minY + ((union.maxY - frame.maxY) / union.height) * bounds.height
+            return (
+                id,
+                CGRect(
+                    x: x,
+                    y: y,
+                    width: (frame.width / union.width) * bounds.width,
+                    height: (frame.height / union.height) * bounds.height))
+        }
+    }
+
+    private func paneRects(
+        _ node: PromptSplitTree,
+        in rect: CGRect
+    ) -> [(id: PromptPane.ID, rect: CGRect)] {
+        switch node {
+        case .leaf(let pane):
+            return [(pane.id, rect)]
+        case .split(let axis, let fraction, let first, let second):
+            let ratio = min(max(fraction, 0), 1)
+            if axis == .horizontal {
+                let firstWidth = rect.width * ratio
+                let firstRect = CGRect(
+                    x: rect.minX,
+                    y: rect.minY,
+                    width: firstWidth,
+                    height: rect.height)
+                let secondRect = CGRect(
+                    x: rect.minX + firstWidth,
+                    y: rect.minY,
+                    width: rect.width - firstWidth,
+                    height: rect.height)
+                return paneRects(first, in: firstRect) + paneRects(second, in: secondRect)
+            }
+
+            let firstHeight = rect.height * ratio
+            let firstRect = CGRect(
+                x: rect.minX,
+                y: rect.minY,
+                width: rect.width,
+                height: firstHeight)
+            let secondRect = CGRect(
+                x: rect.minX,
+                y: rect.minY + firstHeight,
+                width: rect.width,
+                height: rect.height - firstHeight)
+            return paneRects(first, in: firstRect) + paneRects(second, in: secondRect)
+        }
+    }
+
+    private func splitDividers(_ node: PromptSplitTree, in rect: CGRect) -> [Path] {
+        guard case .split(let axis, let fraction, let first, let second) = node else {
+            return []
+        }
+        let ratio = min(max(fraction, 0), 1)
+        var divider = Path()
+
+        if axis == .horizontal {
+            let splitX = rect.minX + rect.width * ratio
+            divider.move(to: CGPoint(x: splitX, y: rect.minY))
+            divider.addLine(to: CGPoint(x: splitX, y: rect.maxY))
+            let firstRect = CGRect(
+                x: rect.minX,
+                y: rect.minY,
+                width: splitX - rect.minX,
+                height: rect.height)
+            let secondRect = CGRect(
+                x: splitX,
+                y: rect.minY,
+                width: rect.maxX - splitX,
+                height: rect.height)
+            return [divider]
+                + splitDividers(first, in: firstRect)
+                + splitDividers(second, in: secondRect)
+        }
+
+        let splitY = rect.minY + rect.height * ratio
+        divider.move(to: CGPoint(x: rect.minX, y: splitY))
+        divider.addLine(to: CGPoint(x: rect.maxX, y: splitY))
+        let firstRect = CGRect(
+            x: rect.minX,
+            y: rect.minY,
+            width: rect.width,
+            height: splitY - rect.minY)
+        let secondRect = CGRect(
+            x: rect.minX,
+            y: splitY,
+            width: rect.width,
+            height: rect.maxY - splitY)
+        return [divider]
+            + splitDividers(first, in: firstRect)
+            + splitDividers(second, in: secondRect)
     }
 }
 
