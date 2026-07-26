@@ -110,6 +110,29 @@ final class PromptWorkspaceStore: ObservableObject {
         updateWorkspace { _ = $0.sessions[index].splitFocused(axis: axis, newPane: pane) }
     }
 
+    func movePane(
+        in sessionID: PromptSession.ID,
+        sourceSurfaceID: UUID,
+        relativeTo targetPaneID: PromptPane.ID,
+        zone: PromptPaneDropZone
+    ) -> Bool {
+        guard let sourcePaneID = runtime.paneID(forSurfaceID: sourceSurfaceID),
+              let index = workspace.sessions.firstIndex(where: { $0.id == sessionID }),
+              workspace.sessions[index].splitTree.panes.contains(where: { $0.id == sourcePaneID }),
+              workspace.sessions[index].splitTree.panes.contains(where: { $0.id == targetPaneID }),
+              sourcePaneID != targetPaneID else { return false }
+
+        var updated = workspace
+        guard updated.sessions[index].splitTree.move(
+            paneID: sourcePaneID,
+            relativeTo: targetPaneID,
+            zone: zone) else { return false }
+        updated.sessions[index].focusedPaneID = sourcePaneID
+        workspace = updated
+        runtime.surface(for: sourcePaneID)?.focus()
+        return true
+    }
+
     func closeFocusedPane() {
         guard let index = workspace.sessions.firstIndex(where: { $0.id == workspace.focusedSessionID }) else { return }
         let paneID = workspace.sessions[index].focusedPaneID
@@ -126,18 +149,34 @@ final class PromptWorkspaceStore: ObservableObject {
     }
 
     func focus(sessionID: PromptSession.ID, paneID: PromptPane.ID) {
-        guard workspace.sessions.contains(where: { $0.id == sessionID }) else { return }
-        if workspace.focusedSessionID != sessionID {
-            resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
-        }
-        updateWorkspace {
-            $0.focusedSessionID = sessionID
-            guard let index = $0.sessions.firstIndex(where: { $0.id == sessionID }) else { return }
-            $0.sessions[index].focusedPaneID = paneID
-        }
+        guard updateFocusedPane(sessionID: sessionID, paneID: paneID) else { return }
         runtime.surface(for: paneID)?.focus()
         runtime.focusRemotePane(paneID)
-        sessionRecency[sessionID] = Date()
+    }
+
+    /// Ghostty consumes the first mouse-down used to transfer focus between
+    /// terminal surfaces. Mirror that native focus change into the workspace
+    /// model without trying to focus the already-focused surface again.
+    func focusFromSurface(sessionID: PromptSession.ID, paneID: PromptPane.ID) {
+        guard let session = workspace.sessions.first(where: { $0.id == sessionID }),
+              workspace.focusedSessionID != sessionID || session.focusedPaneID != paneID,
+              updateFocusedPane(sessionID: sessionID, paneID: paneID) else { return }
+        runtime.focusRemotePane(paneID)
+    }
+
+    func resizeSplit(
+        in sessionID: PromptSession.ID,
+        between firstPaneID: PromptPane.ID,
+        and secondPaneID: PromptPane.ID,
+        fraction: Double
+    ) {
+        guard let index = workspace.sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+        updateWorkspace {
+            _ = $0.sessions[index].splitTree.resizeSplit(
+                between: firstPaneID,
+                and: secondPaneID,
+                fraction: fraction)
+        }
     }
 
     var orderedSessions: [PromptSession] {
@@ -337,6 +376,23 @@ final class PromptWorkspaceStore: ObservableObject {
         } else {
             runtime.close(paneID: paneID, terminateRemotePane: terminateRemotePane)
         }
+    }
+
+    private func updateFocusedPane(
+        sessionID: PromptSession.ID,
+        paneID: PromptPane.ID
+    ) -> Bool {
+        guard workspace.sessions.contains(where: { $0.id == sessionID }) else { return false }
+        if workspace.focusedSessionID != sessionID {
+            resetAnchoredSessionIfNeeded(id: workspace.focusedSessionID)
+        }
+        updateWorkspace {
+            $0.focusedSessionID = sessionID
+            guard let index = $0.sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+            $0.sessions[index].focusedPaneID = paneID
+        }
+        sessionRecency[sessionID] = Date()
+        return true
     }
 
     private func reconcileRemotePanes(

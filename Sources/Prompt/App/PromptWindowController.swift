@@ -13,8 +13,114 @@ enum PromptTheme {
 }
 
 @MainActor
+final class PromptPaneHitRegionRegistry: ObservableObject {
+    private final class WeakRegion {
+        weak var view: NSView?
+
+        init(_ view: NSView) {
+            self.view = view
+        }
+    }
+
+    private var regions: [PromptPane.ID: WeakRegion] = [:]
+    @Published private(set) var frames: [PromptPane.ID: CGRect] = [:]
+
+    func register(_ view: NSView, for paneID: PromptPane.ID) {
+        regions[paneID] = WeakRegion(view)
+        updateFrame(of: view, for: paneID)
+    }
+
+    func unregister(_ view: NSView, for paneID: PromptPane.ID) {
+        guard regions[paneID]?.view === view else { return }
+        regions.removeValue(forKey: paneID)
+        frames.removeValue(forKey: paneID)
+    }
+
+    func updateFrame(of view: NSView, for paneID: PromptPane.ID) {
+        guard view.window != nil else { return }
+        let frame = view.convert(view.bounds, to: nil)
+        guard frames[paneID] != frame else { return }
+        frames[paneID] = frame
+    }
+
+    func paneID(at event: NSEvent) -> PromptPane.ID? {
+        guard let eventWindow = event.window else { return nil }
+        regions = regions.filter { $0.value.view != nil }
+        return regions.first { _, region in
+            guard let view = region.view,
+                  !view.isHidden,
+                  view.window === eventWindow else { return false }
+            return view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+        }?.key
+    }
+}
+
+private final class PromptPaneHitRegionView: NSView {
+    let paneID: PromptPane.ID
+    weak var registry: PromptPaneHitRegionRegistry?
+
+    init(paneID: PromptPane.ID, registry: PromptPaneHitRegionRegistry) {
+        self.paneID = paneID
+        self.registry = registry
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            registry?.register(self, for: paneID)
+        } else {
+            registry?.unregister(self, for: paneID)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        registry?.updateFrame(of: self, for: paneID)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private struct PromptPaneHitRegion: NSViewRepresentable {
+    let paneID: PromptPane.ID
+    let registry: PromptPaneHitRegionRegistry
+
+    func makeNSView(context: Context) -> PromptPaneHitRegionView {
+        PromptPaneHitRegionView(paneID: paneID, registry: registry)
+    }
+
+    func updateNSView(_ view: PromptPaneHitRegionView, context: Context) {}
+
+    static func dismantleNSView(_ view: PromptPaneHitRegionView, coordinator: ()) {
+        view.registry?.unregister(view, for: view.paneID)
+    }
+}
+
+@MainActor
 private final class PromptWindow: NSWindow {
     weak var workspaceStore: PromptWorkspaceStore?
+
+    @discardableResult
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        guard accepted,
+              let workspaceStore,
+              let surface = PromptTerminalSurface.find(containing: responder as? NSView),
+              let paneID = workspaceStore.runtime.paneID(forSurfaceID: surface.id),
+              let session = workspaceStore.workspace.sessions.first(where: {
+                  $0.splitTree.panes.contains(where: { $0.id == paneID })
+              }) else { return accepted }
+        // Ghostty calls this while its local mouse monitor is transferring
+        // first-responder status. Defer publishing SwiftUI state until AppKit
+        // has finished that responder transition.
+        DispatchQueue.main.async { [weak workspaceStore] in
+            workspaceStore?.focusFromSurface(sessionID: session.id, paneID: paneID)
+        }
+        return accepted
+    }
 
     override func sendEvent(_ event: NSEvent) {
         guard [.keyDown, .keyUp, .flagsChanged].contains(event.type),
@@ -732,22 +838,194 @@ private struct PromptSplitNodeView: View {
         switch tree {
         case .leaf(let pane):
             if let surface = store.runtime.surface(for: pane.id) {
-                PromptHostedTerminalView(surface: surface, paneID: pane.id, runtime: store.runtime)
-                    .id(pane.id)
-                    .onTapGesture { store.focus(sessionID: session.id, paneID: pane.id) }
+                GeometryReader { geometry in
+                    PromptHostedTerminalView(
+                        surface: surface,
+                        paneID: pane.id,
+                        runtime: store.runtime)
+                        .id(pane.id)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .modifier(PromptPaneDropTarget(
+                            store: store,
+                            sessionID: session.id,
+                            targetPaneID: pane.id))
+                        .contentShape(Rectangle())
+                        .background(PromptPaneHitRegion(
+                            paneID: pane.id,
+                            registry: store.runtime.paneHitRegions))
+                        .clipped()
+                }
             }
-        case .split(let axis, _, let first, let second):
+        case .split(let axis, let fraction, let first, let second):
             if axis == .horizontal {
                 HSplitView {
                     PromptSplitNodeView(store: store, session: session, tree: first)
+                        .frame(
+                            minWidth: 80,
+                            idealWidth: max(80, CGFloat(fraction) * 1_000),
+                            maxWidth: .infinity,
+                            maxHeight: .infinity)
                     PromptSplitNodeView(store: store, session: session, tree: second)
+                        .frame(
+                            minWidth: 80,
+                            idealWidth: max(80, CGFloat(1 - fraction) * 1_000),
+                            maxWidth: .infinity,
+                            maxHeight: .infinity)
                 }
             } else {
                 VSplitView {
                     PromptSplitNodeView(store: store, session: session, tree: first)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 80,
+                            idealHeight: max(80, CGFloat(fraction) * 1_000),
+                            maxHeight: .infinity)
                     PromptSplitNodeView(store: store, session: session, tree: second)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 80,
+                            idealHeight: max(80, CGFloat(1 - fraction) * 1_000),
+                            maxHeight: .infinity)
                 }
             }
+        }
+    }
+}
+
+private struct PromptPaneDropTarget: ViewModifier {
+    let store: PromptWorkspaceStore
+    let sessionID: PromptSession.ID
+    let targetPaneID: PromptPane.ID
+    @State private var dropState = PromptPaneDropState.idle
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onDrop(
+                            of: [.ghosttySurfaceId],
+                            delegate: PromptPaneDropDelegate(
+                                dropState: $dropState,
+                                viewSize: geometry.size,
+                                store: store,
+                                sessionID: sessionID,
+                                targetPaneID: targetPaneID))
+                }
+            }
+            .overlay {
+                if case .dropping(let zone) = dropState {
+                    PromptPaneDropPreview(zone: zone)
+                        .padding(5)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+    }
+}
+
+private enum PromptPaneDropState: Equatable {
+    case idle
+    case dropping(PromptPaneDropZone)
+}
+
+private struct PromptPaneDropDelegate: DropDelegate {
+    @Binding var dropState: PromptPaneDropState
+    let viewSize: CGSize
+    let store: PromptWorkspaceStore
+    let sessionID: PromptSession.ID
+    let targetPaneID: PromptPane.ID
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    func dropEntered(info: DropInfo) {
+        withAnimation(.easeOut(duration: 0.1)) {
+            dropState = .dropping(Self.zone(at: info.location, in: viewSize))
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard case .dropping = dropState else {
+            return DropProposal(operation: .forbidden)
+        }
+        dropState = .dropping(Self.zone(at: info.location, in: viewSize))
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        withAnimation(.easeOut(duration: 0.1)) { dropState = .idle }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let dropZone = Self.zone(at: info.location, in: viewSize)
+        dropState = .idle
+        guard let provider = info.itemProviders(for: [.ghosttySurfaceId]).first else { return false }
+
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.ghosttySurfaceId.identifier) { data, _ in
+            guard let data, data.count == MemoryLayout<uuid_t>.size else { return }
+            var bytes: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            _ = withUnsafeMutableBytes(of: &bytes) { data.copyBytes(to: $0) }
+            let surfaceID = UUID(uuid: bytes)
+            DispatchQueue.main.async {
+                _ = store.movePane(
+                    in: sessionID,
+                    sourceSurfaceID: surfaceID,
+                    relativeTo: targetPaneID,
+                    zone: dropZone)
+            }
+        }
+        return true
+    }
+
+    static func zone(at point: CGPoint, in size: CGSize) -> PromptPaneDropZone {
+        guard size.width > 0, size.height > 0 else { return .right }
+        let relativeX = point.x / size.width
+        let relativeY = point.y / size.height
+        if (0.25 ... 0.75).contains(relativeX), (0.25 ... 0.75).contains(relativeY) {
+            return .center
+        }
+        let distances: [(PromptPaneDropZone, CGFloat)] = [
+            (.left, point.x),
+            (.right, size.width - point.x),
+            (.top, point.y),
+            (.bottom, size.height - point.y),
+        ]
+        return distances.min(by: { $0.1 < $1.1 })?.0 ?? .right
+    }
+}
+
+private struct PromptPaneDropPreview: View {
+    let zone: PromptPaneDropZone
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color(red: 0.02, green: 0.48, blue: 0.95).opacity(0.28))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color(red: 0.05, green: 0.58, blue: 1), lineWidth: 2)
+                }
+                .frame(
+                    width: zone == .left || zone == .right ? size.width / 2 : size.width,
+                    height: zone == .top || zone == .bottom ? size.height / 2 : size.height)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: alignment)
+        }
+    }
+
+    private var alignment: Alignment {
+        switch zone {
+        case .center: .center
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .leading
+        case .right: .trailing
         }
     }
 }

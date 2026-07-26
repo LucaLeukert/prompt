@@ -312,6 +312,70 @@ final class PromptModelTests: XCTestCase {
         XCTAssertFalse(value.closeFocusedPane())
     }
 
+    func testSplitTreeMovesPaneRelativeToDropTarget() {
+        let first = PromptPane(title: "First")
+        let second = PromptPane(title: "Second")
+        let third = PromptPane(title: "Third")
+        var tree = PromptSplitTree.split(
+            axis: .horizontal,
+            fraction: 0.5,
+            first: .leaf(first),
+            second: .split(
+                axis: .vertical,
+                fraction: 0.5,
+                first: .leaf(second),
+                second: .leaf(third)))
+
+        XCTAssertTrue(tree.move(paneID: third.id, relativeTo: first.id, zone: .left))
+        guard case .split(.horizontal, _, let targetSlot, .leaf(let remaining)) = tree,
+              case .split(.horizontal, _, .leaf(let moved), .leaf(let target)) = targetSlot else {
+            return XCTFail("Expected the moved pane to split the target's existing slot")
+        }
+        XCTAssertEqual(moved.id, third.id)
+        XCTAssertEqual(target.id, first.id)
+        XCTAssertEqual(remaining.id, second.id)
+    }
+
+    func testSplitTreeRejectsDroppingPaneOnItself() {
+        let first = PromptPane(title: "First")
+        let second = PromptPane(title: "Second")
+        var tree = PromptSplitTree.split(
+            axis: .horizontal,
+            fraction: 0.5,
+            first: .leaf(first),
+            second: .leaf(second))
+        let original = tree
+
+        XCTAssertFalse(tree.move(paneID: first.id, relativeTo: first.id, zone: .right))
+        XCTAssertEqual(tree, original)
+    }
+
+    func testSplitTreeCenterDropSwapsPanesWithoutChangingLayout() {
+        let first = PromptPane(title: "First")
+        let second = PromptPane(title: "Second")
+        let third = PromptPane(title: "Third")
+        var tree = PromptSplitTree.split(
+            axis: .horizontal,
+            fraction: 0.4,
+            first: .leaf(first),
+            second: .split(
+                axis: .vertical,
+                fraction: 0.6,
+                first: .leaf(second),
+                second: .leaf(third)))
+
+        XCTAssertTrue(tree.move(paneID: third.id, relativeTo: first.id, zone: .center))
+        guard case .split(.horizontal, let rootFraction, .leaf(let newFirst), let right) = tree,
+              case .split(.vertical, let nestedFraction, .leaf(let unchanged), .leaf(let newThird)) = right else {
+            return XCTFail("Expected a center drop to preserve the split hierarchy")
+        }
+        XCTAssertEqual(rootFraction, 0.4)
+        XCTAssertEqual(nestedFraction, 0.6)
+        XCTAssertEqual(newFirst.id, third.id)
+        XCTAssertEqual(unchanged.id, second.id)
+        XCTAssertEqual(newThird.id, first.id)
+    }
+
     func testRestoredSessionCollapsesToFocusedPane() {
         var value = session()
         let second = PromptPane(title: "Logs")
@@ -327,6 +391,34 @@ final class PromptModelTests: XCTestCase {
         let workspace = PromptWorkspace(name: "Restored", sessions: [session()])
         let state = PromptRestorationState(workspaces: [workspace], selectedWorkspaceID: workspace.id, windowFrame: "{{0,0},{800,600}}")
         XCTAssertEqual(try JSONDecoder().decode(PromptRestorationState.self, from: JSONEncoder().encode(state)), state)
+    }
+
+    func testRestorationRoundTripPreservesNestedSplitLayout() throws {
+        var restoredSession = session()
+        let rootPaneID = restoredSession.focusedPaneID
+        let rightPane = PromptPane(title: "Right")
+        let bottomPane = PromptPane(title: "Bottom")
+        XCTAssertTrue(restoredSession.splitFocused(axis: .horizontal, newPane: rightPane))
+        XCTAssertTrue(restoredSession.splitFocused(axis: .vertical, newPane: bottomPane))
+
+        let workspace = PromptWorkspace(name: "Restored", sessions: [restoredSession])
+        let state = PromptRestorationState(
+            workspaces: [workspace],
+            selectedWorkspaceID: workspace.id,
+            windowFrame: nil)
+        let decoded = try JSONDecoder().decode(
+            PromptRestorationState.self,
+            from: JSONEncoder().encode(state))
+        let restoredTree = try XCTUnwrap(decoded.workspaces.first?.sessions.first?.splitTree)
+
+        guard case .split(.horizontal, _, .leaf(let root), let right) = restoredTree,
+              case .split(.vertical, _, .leaf(let top), .leaf(let bottom)) = right else {
+            return XCTFail("Expected the complete nested split hierarchy to survive restoration")
+        }
+        XCTAssertEqual(root.id, rootPaneID)
+        XCTAssertEqual(top.id, rightPane.id)
+        XCTAssertEqual(bottom.id, bottomPane.id)
+        XCTAssertEqual(decoded.workspaces.first?.sessions.first?.focusedPaneID, bottomPane.id)
     }
 
     func testLegacyLocalConfigurationDefaultsToStandardBehavior() throws {
@@ -665,6 +757,29 @@ final class PromptModelTests: XCTestCase {
         store.focus(sessionID: first.id, paneID: first.focusedPaneID)
 
         XCTAssertEqual(store.workspace.focusedSessionID, first.id)
+        XCTAssertEqual(changes, 1)
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
+    func testWorkspaceStoreMirrorsNativeSurfaceFocusWithoutRepublishingCurrentPane() throws {
+        let runtime = Self.integrationRuntime
+        let store = PromptWorkspaceStore(runtime: runtime)
+        let session = try XCTUnwrap(store.createLocal(
+            directory: NSTemporaryDirectory(),
+            title: "Split"))
+        let originalPaneID = session.focusedPaneID
+        store.splitFocused(axis: .horizontal)
+        let splitSession = try XCTUnwrap(store.workspace.sessions.first)
+        let secondPaneID = splitSession.focusedPaneID
+        var changes = 0
+        let observation = store.objectWillChange.sink { changes += 1 }
+
+        store.focusFromSurface(sessionID: splitSession.id, paneID: secondPaneID)
+        XCTAssertEqual(changes, 0)
+
+        store.focusFromSurface(sessionID: splitSession.id, paneID: originalPaneID)
+        XCTAssertEqual(store.workspace.sessions.first?.focusedPaneID, originalPaneID)
         XCTAssertEqual(changes, 1)
         withExtendedLifetime(observation) {}
     }

@@ -592,6 +592,7 @@ final class PromptTerminalRuntime: ObservableObject {
     }
 
     let application: GhosttyAppKitApplication
+    let paneHitRegions = PromptPaneHitRegionRegistry()
     @Published private(set) var surfaces: [PromptPane.ID: PromptTerminalSurface] = [:]
     @Published private(set) var remotePaneStatuses: [PromptPane.ID: RemotePaneStatus] = [:]
     @Published private(set) var remoteConnectionStates: [PromptPane.ID: RemoteConnectionState] = [:]
@@ -764,6 +765,12 @@ final class PromptTerminalRuntime: ObservableObject {
     }
 
     func surface(for paneID: PromptPane.ID) -> PromptTerminalSurface? { surfaces[paneID] }
+
+    func paneID(forSurfaceID surfaceID: UUID) -> PromptPane.ID? {
+        surfaces.first(where: {
+            $0.value.id == surfaceID || $0.value.authoritativeSurface?.id == surfaceID
+        })?.key
+    }
 
     func localCodexThread(for surface: PromptTerminalSurface) -> SidebarCodexThread? {
         guard let paneID = surfaces.first(where: { $0.value === surface })?.key,

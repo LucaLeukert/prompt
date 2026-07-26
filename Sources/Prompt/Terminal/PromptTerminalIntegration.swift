@@ -6,6 +6,16 @@ enum PromptTerminalIntegration {
     private static var lastCodexInterruptAt: [ObjectIdentifier: Date] = [:]
 
     static func install() {
+        GhosttyAppKitHooks.leftMouseDownTarget = { event in
+            guard let runtime = (NSApp.delegate as? PromptApplicationDelegate)?.runtime,
+                  let paneID = runtime.paneHitRegions.paneID(at: event),
+                  let surface = runtime.surface(for: paneID) else { return nil }
+            if surface.compositeIsAlternateScreen,
+               let authority = surface.authoritativeSurface {
+                return authority.hostedView
+            }
+            return surface.hostedView
+        }
         GhosttyAppKitHooks.overlay = { view in
             let surface = PromptTerminalSurface.wrap(view)
             guard !PromptTerminalCapabilities.isCompositeAuthority(surface) else { return nil }

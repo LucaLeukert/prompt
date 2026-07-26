@@ -17,6 +17,30 @@ enum PromptSplitAxis: String, Codable, Equatable {
     case vertical
 }
 
+enum PromptPaneDropZone: String, Equatable {
+    case center
+    case top
+    case bottom
+    case left
+    case right
+
+    var axis: PromptSplitAxis? {
+        switch self {
+        case .center: nil
+        case .left, .right: .horizontal
+        case .top, .bottom: .vertical
+        }
+    }
+
+    var placesSourceAfterTarget: Bool {
+        switch self {
+        case .center: false
+        case .right, .bottom: true
+        case .left, .top: false
+        }
+    }
+}
+
 indirect enum PromptSplitTree: Codable, Equatable {
     case leaf(PromptPane)
     case split(axis: PromptSplitAxis, fraction: Double, first: PromptSplitTree, second: PromptSplitTree)
@@ -65,6 +89,89 @@ indirect enum PromptSplitTree: Codable, Equatable {
                 self = .split(axis: axis, fraction: fraction, first: lhs, second: rhs)
                 return self
             }
+        }
+    }
+
+    mutating func move(paneID: PromptPane.ID, relativeTo targetPaneID: PromptPane.ID, zone: PromptPaneDropZone) -> Bool {
+        guard paneID != targetPaneID,
+              let pane = panes.first(where: { $0.id == paneID }),
+              let targetPane = panes.first(where: { $0.id == targetPaneID }) else { return false }
+
+        if zone == .center {
+            swap(paneID: paneID, with: targetPaneID, firstPane: pane, secondPane: targetPane)
+            return true
+        }
+
+        guard let axis = zone.axis,
+              let remaining = remove(paneID: paneID) else { return false }
+
+        self = remaining
+        return split(
+            paneID: targetPaneID,
+            axis: axis,
+            newPane: pane,
+            placingNewPaneAfter: zone.placesSourceAfterTarget)
+    }
+
+    mutating func resizeSplit(
+        between firstPaneID: PromptPane.ID,
+        and secondPaneID: PromptPane.ID,
+        fraction: Double
+    ) -> Bool {
+        guard case .split(let axis, let currentFraction, var first, var second) = self else {
+            return false
+        }
+        if first.resizeSplit(
+            between: firstPaneID,
+            and: secondPaneID,
+            fraction: fraction
+        ) || second.resizeSplit(
+            between: firstPaneID,
+            and: secondPaneID,
+            fraction: fraction
+        ) {
+            self = .split(
+                axis: axis,
+                fraction: currentFraction,
+                first: first,
+                second: second)
+            return true
+        }
+        guard first.panes.contains(where: { $0.id == firstPaneID }),
+              second.panes.contains(where: { $0.id == secondPaneID }) else { return false }
+        self = .split(
+            axis: axis,
+            fraction: min(max(fraction, 0.05), 0.95),
+            first: first,
+            second: second)
+        return true
+    }
+
+    private mutating func swap(
+        paneID firstPaneID: PromptPane.ID,
+        with secondPaneID: PromptPane.ID,
+        firstPane: PromptPane,
+        secondPane: PromptPane
+    ) {
+        switch self {
+        case .leaf(let pane) where pane.id == firstPaneID:
+            self = .leaf(secondPane)
+        case .leaf(let pane) where pane.id == secondPaneID:
+            self = .leaf(firstPane)
+        case .leaf:
+            break
+        case .split(let axis, let fraction, var first, var second):
+            first.swap(
+                paneID: firstPaneID,
+                with: secondPaneID,
+                firstPane: firstPane,
+                secondPane: secondPane)
+            second.swap(
+                paneID: firstPaneID,
+                with: secondPaneID,
+                firstPane: firstPane,
+                secondPane: secondPane)
+            self = .split(axis: axis, fraction: fraction, first: first, second: second)
         }
     }
 }

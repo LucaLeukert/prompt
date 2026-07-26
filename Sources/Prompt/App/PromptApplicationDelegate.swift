@@ -114,7 +114,6 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
                 return configuration.behavior == .disposable
             }
             for index in restored.sessions.indices {
-                restored.sessions[index].collapseToFocusedPane()
                 if case .local(var configuration) = restored.sessions[index].configuration {
                     var isDirectory: ObjCBool = false
                     let exists = FileManager.default.fileExists(
