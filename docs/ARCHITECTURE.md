@@ -11,7 +11,7 @@ AI orchestration behind separate boundaries.
 ┌──────────────────────────────── Prompt.app ────────────────────────────────┐
 │                                                                            │
 │  AppKit lifecycle + SwiftUI UI       Workspace/session model               │
-│  Sources/Prompt/App                  Sources/Prompt/Workspace, Sessions    │
+│  Sources/Prompt/App + UI             Sources/Prompt/Workspace, Sessions    │
 │                 │                              │                           │
 │                 └──────────────┬───────────────┘                           │
 │                                │                                           │
@@ -19,7 +19,7 @@ AI orchestration behind separate boundaries.
 │                    Sources/Prompt/Terminal                                 │
 │                       │                  │                                 │
 │             GhosttyAppKit boundary     AI/context boundary                 │
-│             Sources/GhosttyAppKit      PromptAI + PromptContextEngine      │
+│             Sources/GhosttyAppKit      Sources/Prompt/AI                   │
 │                       │                  │                                 │
 └───────────────────────┼──────────────────┼─────────────────────────────────┘
                         │                  │
@@ -29,6 +29,40 @@ AI orchestration behind separate boundaries.
 ```
 
 ## Major boundaries
+
+### Source layout
+
+The source tree is feature-first. New code belongs with the feature that owns
+its behavior rather than in a generic root-level file:
+
+```text
+Sources/
+├── GhosttyAppKit/                 reusable Ghostty host adapter
+└── Prompt/
+    ├── App/                       process lifecycle and app-wide services
+    ├── AI/
+    │   ├── Ambient/               silent post-command analysis
+    │   ├── Completion/            inline-completion context
+    │   ├── Context/               terminal evidence and prompt assembly
+    │   ├── Input/                 submission classification and routing
+    │   ├── Models/                interactive AI state and value models
+    │   ├── RichContent/           terminal-anchored response presentation
+    │   ├── Services/              Codex and Copilot process clients
+    │   └── UI/                    AI composer, overlays, and controls
+    ├── Panes/                     persistent pane values
+    ├── Sessions/                  session values and launchers
+    ├── Terminal/                  live terminal runtime and transports
+    ├── UI/
+    │   ├── CommandPalette/        palette framework and destinations
+    │   └── Workspace/             window, sidebar, and split-pane UI
+    └── Workspace/                 persistent workspace state
+```
+
+Keep dependencies pointing inward: UI may coordinate feature models, feature
+models may use app-wide services and terminal abstractions, and only the
+terminal integration layer should reach through the `GhosttyAppKit` boundary.
+Place new context, completion, transport, model, or UI work in its corresponding
+feature subdirectory. There is intentionally no catch-all `PromptAI.swift`.
 
 ### Application and workspace state
 

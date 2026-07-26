@@ -46,7 +46,7 @@ your attention between a terminal and a separate chat application.
   shell completions when their local tools and credentials are available.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the project's technical
-boundaries.
+boundaries and feature-first source layout.
 
 ## Requirements
 
