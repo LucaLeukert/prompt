@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - production
 
 permissions:
   contents: read
@@ -15,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint and format
+  verify:
+    name: Lint, build, and test
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 90
 
     steps:
       - name: Check out source
@@ -26,39 +25,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install lint tools
-        run: make lint-install
+      - name: Install development tools
+        run: |
+          make lint-install
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+
+      - name: Cache Swift packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            DerivedData/SourcePackages
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Config/Package.resolved') }}
 
       - name: Run linters
         run: make lint
 
-  build-and-test:
-    name: Validate repository wiring
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out source and Ghostty submodule
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Verify isolated Ghostty integration
-        run: |
-          make sync
-          git diff --check
-          git -C Vendor/ghostty diff --check
-          test -z "$(git -C Vendor/ghostty status --porcelain)"
-          test ! -e .build/ghostty/macos/Sources/Prompt
-          test ! -e .build/ghostty/macos/Sources/GhosttyAppKit
-
-      - name: Validate project definition
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          spec = Path("project.yml").read_text()
-          assert "name: Prompt" in spec
-          assert "Vendor/ghostty/macos/Sources/Prompt" not in spec
-          assert ".build/ghostty/macos/Sources" in spec
-          PY
+      - name: Build and test
+        run: make test
