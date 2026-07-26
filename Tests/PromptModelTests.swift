@@ -717,7 +717,9 @@ final class PromptModelTests: XCTestCase {
         surface.sendText("cd \(root.path)")
         PromptController.pressReturn(on: surface)
 
-        let deadline = ContinuousClock.now + .seconds(2)
+        // Fresh CI runners can take several seconds to start the shell and
+        // deliver the first OSC 7 working-directory update.
+        let deadline = ContinuousClock.now + .seconds(10)
         while surface.workingDirectory != root.path, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
