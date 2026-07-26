@@ -153,10 +153,10 @@ private enum LegacyPromptCompletionContextEngine {
                     includingPropertiesForKeys: [.isDirectoryKey],
                     options: [.skipsHiddenFiles])
                 let entries: [String] = rootURLs?.map { url in
-                        let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                        return url.lastPathComponent + (isDirectory ? "/" : "")
-                    }
-                    .sorted().prefix(40).map { $0 } ?? []
+                    let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                    return url.lastPathComponent + (isDirectory ? "/" : "")
+                }
+                .sorted().prefix(40).map { $0 } ?? []
                 return (directory.path, branch, entries)
             }
             let parent = directory.deletingLastPathComponent()
@@ -397,7 +397,7 @@ final class PromptContextEngine {
     private func queryTerms(_ query: String) -> [String] {
         let stop = Set(["about", "after", "again", "could", "from", "have", "into", "just", "that", "the", "this", "what", "when", "where", "which", "with", "would", "your"])
         return Array(Set(query.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
-            .filter { $0.count >= 3 && !stop.contains($0) }))
+                .filter { $0.count >= 3 && !stop.contains($0) }))
     }
 
     private func relevance(of content: String, source: String, terms: [String]) -> Int {

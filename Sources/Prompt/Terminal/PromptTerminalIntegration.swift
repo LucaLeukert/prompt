@@ -6,6 +6,16 @@ enum PromptTerminalIntegration {
     private static var lastCodexInterruptAt: [ObjectIdentifier: Date] = [:]
 
     static func install() {
+        GhosttyAppKitHooks.leftMouseDownTarget = { event in
+            guard let runtime = (NSApp.delegate as? PromptApplicationDelegate)?.runtime,
+                  let paneID = runtime.paneHitRegions.paneID(at: event),
+                  let surface = runtime.surface(for: paneID) else { return nil }
+            if surface.compositeIsAlternateScreen,
+               let authority = surface.authoritativeSurface {
+                return authority.hostedView
+            }
+            return surface.hostedView
+        }
         GhosttyAppKitHooks.overlay = { view in
             let surface = PromptTerminalSurface.wrap(view)
             guard !PromptTerminalCapabilities.isCompositeAuthority(surface) else { return nil }
@@ -62,6 +72,13 @@ enum PromptTerminalIntegration {
                     Notification.Name.CommandExitCodeKey: exitCode,
                     Notification.Name.CommandDurationNanosecondsKey: duration,
                 ])
+        }
+        GhosttyAppKitHooks.childDidExit = { view, exitCode in
+            NotificationCenter.default.post(
+                name: .promptTerminalChildExited,
+                object: PromptTerminalSurface.wrap(view),
+                userInfo: [Notification.Name.CommandExitCodeKey: exitCode])
+            return true
         }
         GhosttyAppKitHooks.keyDown = handleKeyDown
     }
@@ -130,6 +147,7 @@ enum PromptTerminalIntegration {
 
 extension Notification.Name {
     static let ghosttyCommandDidFinish = Notification.Name("dev.prompt.commandDidFinish")
+    static let promptTerminalChildExited = Notification.Name("dev.prompt.childExited")
     static let CommandExitCodeKey = ghosttyCommandDidFinish.rawValue + ".exitCode"
     static let CommandDurationNanosecondsKey = ghosttyCommandDidFinish.rawValue + ".durationNanoseconds"
     static let promptRemoteControlC = Notification.Name("dev.prompt.remoteControlC")

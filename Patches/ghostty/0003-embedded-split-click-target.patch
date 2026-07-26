@@ -1,0 +1,36 @@
+diff --git a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift
+index 4eadcd47..6fc8339d 100644
+--- a/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift	
++++ b/macos/Sources/Ghostty/Surface View/SurfaceView_AppKit.swift	
+@@ -658,15 +658,22 @@ extension Ghostty {
+                   event.window != nil,
+                   window == event.window else { return event }
+ 
+-            // The clicked location in this window should be this view.
+-            guard
+-                let location = window.contentView?.convert(event.locationInWindow, from: nil)
+-            else {
+-                return event
+-            }
+-            // We should use window to perform hitTest here,
+-            // because there could be some other overlays on top, like search bar
+-            guard window.contentView?.hitTest(location) == self else { return event }
++            if let target = GhosttyAppKitHooks.leftMouseDownTarget?(event) {
++                // An embedding host may own the split layout. In that case its
++                // leaf geometry is authoritative, and only the monitor for the
++                // resolved surface may perform the responder transfer.
++                guard target === self else { return event }
++            } else {
++                // The clicked location in this window should be this view.
++                guard
++                    let location = window.contentView?.convert(event.locationInWindow, from: nil)
++                else {
++                    return event
++                }
++                // We should use window to perform hitTest here,
++                // because there could be some other overlays on top, like search bar
++                guard window.contentView?.hitTest(location) == self else { return event }
++            }
+ 
+             // We always assume that we're resetting our mouse suppression
+             // unless we see the specific scenario below to set it.

@@ -6,14 +6,14 @@ import Darwin
 /// terminal sessions. Values are deliberately absent unless an experiment is
 /// explicitly enabled, so every flag defaults to `false`.
 enum PromptExperimentalFeatures {
-    static let remoteAIEnabledDefaultsKey = "PromptExperimentalRemoteAIEnabled"
+    static let remoteAIEnabledSettingKey = "PromptExperimentalRemoteAIEnabled"
 
     static var remoteAIEnabled: Bool {
-        remoteAIEnabled(in: .ghostty)
+        remoteAIEnabled(in: .shared)
     }
 
-    static func remoteAIEnabled(in defaults: UserDefaults) -> Bool {
-        defaults.object(forKey: remoteAIEnabledDefaultsKey) as? Bool ?? false
+    static func remoteAIEnabled(in settings: PromptSettings) -> Bool {
+        settings.value(forKey: remoteAIEnabledSettingKey) ?? false
     }
 }
 
@@ -408,8 +408,8 @@ private final class PromptCodexAgentBridge {
     init?(paneID: PromptPane.ID, workingDirectory: String) {
         guard FileManager.default.isExecutableFile(atPath: PromptAgentCommand.codex) else { return nil }
         executable = PromptAgentCommand.codex
-        socketDirectory = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/prompt/codex-\(paneID.uuidString)", isDirectory: true).path
+        socketDirectory = PromptPaths().cache
+            .appendingPathComponent("codex-\(paneID.uuidString)", isDirectory: true).path
         socketPath = "\(socketDirectory)/proxy.sock"
         upstreamSocketPath = "\(socketDirectory)/server.sock"
         launcherPath = "\(socketDirectory)/launch.command"
@@ -592,6 +592,7 @@ final class PromptTerminalRuntime: ObservableObject {
     }
 
     let application: GhosttyAppKitApplication
+    let paneHitRegions = PromptPaneHitRegionRegistry()
     @Published private(set) var surfaces: [PromptPane.ID: PromptTerminalSurface] = [:]
     @Published private(set) var remotePaneStatuses: [PromptPane.ID: RemotePaneStatus] = [:]
     @Published private(set) var remoteConnectionStates: [PromptPane.ID: RemoteConnectionState] = [:]
@@ -599,6 +600,7 @@ final class PromptTerminalRuntime: ObservableObject {
     var remoteTmuxPaneIDs: [PromptPane.ID: String] = [:]
     private var remoteConfigurations: [PromptPane.ID: PromptRemoteSessionConfiguration] = [:]
     var onRemotePaneInventory: ((PromptPane.ID, [RemotePaneDescriptor]) -> Void)?
+    var onLocalCommandFinished: ((PromptPane.ID, Int32, Bool) -> Void)?
     @Published private(set) var localGitBranches: [PromptPane.ID: String] = [:]
     @Published private(set) var localPaneCommands: [PromptPane.ID: String] = [:]
     @Published private(set) var localPullRequests: [PromptPane.ID: SidebarPullRequest] = [:]
@@ -662,6 +664,17 @@ final class PromptTerminalRuntime: ObservableObject {
                           let paneID = self.surfaces.first(where: { $0.value === surface })?.key else { return }
                     self.localPaneCommands.removeValue(forKey: paneID)
                     self.localCommandStartedAt.removeValue(forKey: paneID)
+                    let exitCode = note.userInfo?[Notification.Name.CommandExitCodeKey] as? Int32 ?? 0
+                    self.onLocalCommandFinished?(paneID, exitCode, false)
+                },
+            NotificationCenter.default.addObserver(
+                forName: .promptTerminalChildExited, object: nil, queue: .main) { [weak self] note in
+                    guard let self,
+                          let surface = note.object as? PromptTerminalSurface,
+                          let paneID = self.surfaces.first(where: { $0.value === surface })?.key else { return }
+                    let exitCode = note.userInfo?[Notification.Name.CommandExitCodeKey] as? Int32
+                        ?? Int32(note.userInfo?[Notification.Name.CommandExitCodeKey] as? Int ?? 0)
+                    self.onLocalCommandFinished?(paneID, exitCode, true)
                 },
         ]
     }
@@ -676,7 +689,7 @@ final class PromptTerminalRuntime: ObservableObject {
                 : nil
             let adapterConfig = GhosttyAppKitSurfaceConfiguration(
                 workingDirectory: local.workingDirectory,
-                command: bridge?.command ?? local.command,
+                command: bridge?.command ?? Self.localLaunchCommand(local),
                 initialInput: nil)
             guard let hosted = application.makeSurface(configuration: adapterConfig) else { return nil }
             surface = PromptTerminalSurface.wrap(hosted.hostedView)
@@ -693,7 +706,9 @@ final class PromptTerminalRuntime: ObservableObject {
             }
 
         case .remote(let remote) where remote.transport == .controlMode:
-            let router = PromptCompositeIORouter()
+            let router = PromptCompositeIORouter(suppressOutputUntilRemoteReady: true)
+            let readinessFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent("prompt-remote-\(UUID().uuidString).ready").path
             let presentationConfig = GhosttyAppKitSurfaceConfiguration(
                 workingDirectory: nil,
                 command: nil,
@@ -702,15 +717,17 @@ final class PromptTerminalRuntime: ObservableObject {
             guard let presentation = application.makeSurface(configuration: presentationConfig) else { return nil }
             let authorityConfig = GhosttyAppKitSurfaceConfiguration(
                 workingDirectory: nil,
-                command: PromptRemoteCommand.buildControlMode(remote),
+                command: PromptRemoteCommand.buildControlMode(remote, readinessFile: readinessFile),
                 initialInput: nil)
             guard let authority = application.makeSurface(configuration: authorityConfig) else {
+                try? FileManager.default.removeItem(atPath: readinessFile)
                 presentation.requestClose()
                 return nil
             }
             surface = PromptTerminalSurface.wrap(presentation.hostedView)
             surface.configureComposite(authority: authority, router: router)
             PromptTerminalCapabilities.registerCompositeAuthority(authority)
+            _ = FileManager.default.createFile(atPath: readinessFile, contents: Data())
 
         case .remote(let remote):
             let adapterConfig = GhosttyAppKitSurfaceConfiguration(
@@ -736,7 +753,24 @@ final class PromptTerminalRuntime: ObservableObject {
         return surface
     }
 
+    nonisolated static func localLaunchCommand(_ configuration: PromptLocalSessionConfiguration) -> String? {
+        guard let command = configuration.command else { return nil }
+        guard !configuration.environment.isEmpty else { return command }
+        let assignments = configuration.environment.sorted { $0.key < $1.key }.compactMap { key, value -> String? in
+            guard key.range(of: #"^[A-Za-z_][A-Za-z0-9_]*$"#, options: .regularExpression) != nil else { return nil }
+            return "\(key)=\(shellQuote(value))"
+        }
+        guard !assignments.isEmpty else { return command }
+        return "env \(assignments.joined(separator: " ")) /bin/sh -lc \(shellQuote(command))"
+    }
+
     func surface(for paneID: PromptPane.ID) -> PromptTerminalSurface? { surfaces[paneID] }
+
+    func paneID(forSurfaceID surfaceID: UUID) -> PromptPane.ID? {
+        surfaces.first(where: {
+            $0.value.id == surfaceID || $0.value.authoritativeSurface?.id == surfaceID
+        })?.key
+    }
 
     func localCodexThread(for surface: PromptTerminalSurface) -> SidebarCodexThread? {
         guard let paneID = surfaces.first(where: { $0.value === surface })?.key,
@@ -830,7 +864,8 @@ final class PromptTerminalRuntime: ObservableObject {
                     self?.remotePaneStatuses[paneID] = status
                     self?.remoteConnectionStates[paneID] = .online
                     PromptTerminalCapabilities.updateRemoteDirectory(status.workingDirectory, on: surface)
-                    if self?.remoteTmuxPaneIDs[paneID] == nil,
+                    let knownPane = self?.remoteTmuxPaneIDs[paneID]
+                    if (knownPane == nil || !status.panes.contains(where: { $0.id == knownPane })),
                        let active = status.panes.first(where: \.active) {
                         self?.remoteTmuxPaneIDs[paneID] = active.id
                     }
@@ -1005,8 +1040,15 @@ enum PromptRemoteCommand {
     }
 
     static func buildControlMode(_ remote: PromptRemoteSessionConfiguration) -> String {
+        buildControlMode(remote, readinessFile: nil)
+    }
+
+    static func buildControlMode(
+        _ remote: PromptRemoteSessionConfiguration,
+        readinessFile: String?
+    ) -> String {
         let executable = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
-        return [
+        var arguments = [
             shellQuote(executable),
             PromptTmuxControlBridge.argument,
             shellQuote(remote.destination),
@@ -1014,7 +1056,9 @@ enum PromptRemoteCommand {
             shellQuote(remote.tmuxPaneID ?? "-"),
             shellQuote(remote.workingDirectory ?? "-"),
             remote.attachOnly ? "attach" : "create",
-        ].joined(separator: " ")
+        ]
+        if let readinessFile { arguments.append(shellQuote(readinessFile)) }
+        return arguments.joined(separator: " ")
     }
 
     static func buildLegacy(_ remote: PromptRemoteSessionConfiguration) -> String {
@@ -1048,11 +1092,11 @@ struct PromptHostedTerminalView: View {
         GeometryReader { geometry in
             ZStack(alignment: .top) {
                 Group {
-                if showingAuthoritativeSurface, let authority = surface.authoritativeSurface {
-                    GhosttyAppKitSurfaceHost(surface: authority, application: runtime.application)
-                } else {
-                    GhosttyAppKitSurfaceHost(surface: surface, application: runtime.application)
-                }
+                    if showingAuthoritativeSurface, let authority = surface.authoritativeSurface {
+                        GhosttyAppKitSurfaceHost(surface: authority, application: runtime.application)
+                    } else {
+                        GhosttyAppKitSurfaceHost(surface: surface, application: runtime.application)
+                    }
                 }
                 if case .offline(let description) = runtime.remoteConnectionStates[paneID] {
                     HStack(alignment: .top, spacing: 10) {

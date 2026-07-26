@@ -16,23 +16,10 @@ enum PromptTmuxControlBridge {
         let requestedPane = arguments[3] == "-" ? nil : arguments[3]
         let workingDirectory = arguments[4] == "-" ? nil : arguments[4]
         let attachOnly = arguments[5] == "attach"
-
-        var tmux = attachOnly
-            ? "exec tmux -C attach-session -t \(shellQuote(session))"
-            : "exec tmux -C new-session -A -s \(shellQuote(session))"
-        if let workingDirectory, !attachOnly {
-            let directory: String
-            if workingDirectory == "~" || workingDirectory == "~/" { directory = "\"$HOME\"" }
-            else if workingDirectory.hasPrefix("~/") {
-                directory = "\"$HOME\"/" + shellQuote(String(workingDirectory.dropFirst(2)))
-            } else { directory = shellQuote(workingDirectory) }
-            tmux += " -c \(directory)"
+        if arguments.count > 6 {
+            waitUntilReady(at: arguments[6])
         }
-        let sshArguments = [
-            "-T", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2",
-            "-o", "StrictHostKeyChecking=accept-new",
-            destination, "sh", "-lc", shellQuote(tmux),
-        ]
+
         var firstConnection = true
         while true {
             if !firstConnection {
@@ -40,6 +27,36 @@ enum PromptTmuxControlBridge {
                 Thread.sleep(forTimeInterval: 3)
             }
             firstConnection = false
+            let shouldRestoreExistingScreen = remoteSessionExists(
+                destination: destination,
+                session: session)
+            if attachOnly, !shouldRestoreExistingScreen {
+                exitWithMessage("Remote tmux session \(session) does not exist.")
+            }
+            var tmux: String
+            if shouldRestoreExistingScreen {
+                tmux = "exec tmux -C attach-session -t \(shellQuote(session))"
+            } else {
+                tmux = "exec tmux -C new-session -s \(shellQuote(session))"
+                if let workingDirectory {
+                    let directory: String
+                    if workingDirectory == "~" || workingDirectory == "~/" { directory = "\"$HOME\"" }
+                    else if workingDirectory.hasPrefix("~/") {
+                        directory = "\"$HOME\"/" + shellQuote(String(workingDirectory.dropFirst(2)))
+                    } else { directory = shellQuote(workingDirectory) }
+                    tmux += " -c \(directory)"
+                }
+                let startup = """
+                if [ -r /run/motd.dynamic ]; then cat /run/motd.dynamic; printf '\\n'; fi
+                exec "${SHELL:-/bin/sh}" -l
+                """
+                tmux += " " + shellQuote("/bin/sh -lc \(shellQuote(startup))")
+            }
+            let sshArguments = [
+                "-T", "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2",
+                "-o", "StrictHostKeyChecking=accept-new",
+                destination, "sh", "-lc", shellQuote(tmux),
+            ]
 
             let process = Process()
             let input = Pipe()
@@ -50,11 +67,26 @@ enum PromptTmuxControlBridge {
             process.standardOutput = output
             process.standardError = FileHandle.standardError
             do { try process.run() } catch { continue }
+            writeAll(
+                FileHandle.standardOutput.fileDescriptor,
+                Array(PromptCompositeIORouter.remoteReadyMarker))
 
-            let writer = PromptTmuxControlWriter(handle: input.fileHandleForWriting)
-            let parser = PromptTmuxControlParser(requestedPane: requestedPane) { bytes in
-                writeAll(FileHandle.standardOutput.fileDescriptor, bytes)
+            let selectedPane = resolvePane(
+                destination: destination,
+                session: session,
+                requestedPane: requestedPane)
+            if let selectedPane, shouldRestoreExistingScreen {
+                writeAll(
+                    FileHandle.standardOutput.fileDescriptor,
+                    initialScreen(
+                        destination: destination,
+                        pane: selectedPane))
             }
+            let writer = PromptTmuxControlWriter(handle: input.fileHandleForWriting)
+            let parser = PromptTmuxControlParser(
+                requestedPane: selectedPane,
+                output: { bytes in writeAll(FileHandle.standardOutput.fileDescriptor, bytes) })
+            if let selectedPane { writer.select(pane: selectedPane) }
             let outputHandle = output.fileHandleForReading
             outputHandle.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -98,10 +130,120 @@ enum PromptTmuxControlBridge {
         _ = tcsetattr(descriptor, TCSANOW, &attributes)
     }
 
+    /// The presentation surface must install its output tee before SSH/tmux
+    /// can emit the initial prompt. Otherwise that one-time output is lost,
+    /// and input typed into the apparently blank terminal can race pane setup.
+    private static func waitUntilReady(at path: String) {
+        while !FileManager.default.fileExists(atPath: path) {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        // The marker must remain present until it is observed. Removing it in
+        // the parent immediately after creation turns the handshake into a
+        // pulse that this polling child can miss.
+        try? FileManager.default.removeItem(atPath: path)
+    }
+
     private static func terminalSize() -> (rows: Int, columns: Int)? {
         var value = winsize()
         guard ioctl(FileHandle.standardInput.fileDescriptor, TIOCGWINSZ, &value) == 0 else { return nil }
         return (max(1, Int(value.ws_row)), max(1, Int(value.ws_col)))
+    }
+
+    /// A newly attached tmux control client only receives future `%output`.
+    /// Seed Ghostty with the active pane's existing screen so its shell prompt
+    /// is visible before the user types.
+    private static func initialScreen(destination: String, pane: String) -> [UInt8] {
+        let contents = capturePane(destination: destination, pane: pane) ?? ""
+        return Array(("\u{1B}[2J\u{1B}[H" + contents).utf8)
+    }
+
+    private static func resolvePane(
+        destination: String,
+        session: String,
+        requestedPane: String?
+    ) -> String? {
+        let deadline = Date().addingTimeInterval(2)
+        repeat {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = [
+                "-T", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                destination, "tmux", "list-panes", "-t", session,
+                "-F", "'#{pane_id} #{pane_active}'",
+            ]
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            if (try? process.run()) != nil {
+                process.waitUntilExit()
+                let lines = String(
+                    decoding: output.fileHandleForReading.readDataToEndOfFile(),
+                    as: UTF8.self)
+                    .split(separator: "\n")
+                    .map { $0.split(separator: " ", maxSplits: 1).map(String.init) }
+                if let requestedPane,
+                   lines.contains(where: { $0.first == requestedPane }) {
+                    return requestedPane
+                }
+                if let active = lines.first(where: { $0.count == 2 && $0[1] == "1" })?.first {
+                    return active
+                }
+                if let first = lines.first?.first { return first }
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while Date() < deadline
+        return nil
+    }
+
+    private static func remoteSessionExists(destination: String, session: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = [
+            "-T", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            destination, "tmux", "has-session", "-t", session,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    private static func capturePane(destination: String, pane: String) -> String? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        process.arguments = [
+            "-T", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            destination, "sh", "-lc",
+            shellQuote(
+                "tmux capture-pane -p -e -t \(shellQuote(pane)); "
+                    + "tmux display-message -p -t \(shellQuote(pane)) "
+                    + shellQuote("PROMPT_CURSOR=#{cursor_x}:#{cursor_y}")),
+        ]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        var lines = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard let markerIndex = lines.lastIndex(where: { $0.hasPrefix("PROMPT_CURSOR=") }) else {
+            return lines.joined(separator: "\r\n")
+        }
+        let coordinates = lines[markerIndex]
+            .dropFirst("PROMPT_CURSOR=".count)
+            .split(separator: ":")
+            .compactMap { Int($0) }
+        lines.removeSubrange(markerIndex...)
+        let grid = lines.joined(separator: "\r\n")
+        guard coordinates.count == 2 else { return grid }
+        return grid + "\u{1B}[\(coordinates[1] + 1);\(coordinates[0] + 1)H"
     }
 
     private static func writeAll(_ descriptor: Int32, _ bytes: [UInt8]) {
@@ -186,11 +328,18 @@ final class PromptTmuxControlParser: @unchecked Sendable {
     private var buffer = Data()
     private let requestedPane: String?
     private let output: ([UInt8]) -> Void
+    private let selection: ((String) -> Void)?
     private(set) var selectedPane: String?
+    private var seededSelection = false
 
-    init(requestedPane: String?, output: @escaping ([UInt8]) -> Void) {
+    init(
+        requestedPane: String?,
+        output: @escaping ([UInt8]) -> Void,
+        selection: ((String) -> Void)? = nil
+    ) {
         self.requestedPane = requestedPane
         self.output = output
+        self.selection = selection
         selectedPane = requestedPane
     }
 
@@ -211,6 +360,10 @@ final class PromptTmuxControlParser: @unchecked Sendable {
             guard components.count == 2 else { return }
             if requestedPane == components[0] || (requestedPane == nil && components[1] == "1") {
                 selectedPane = components[0]
+                if !seededSelection {
+                    seededSelection = true
+                    selection?(components[0])
+                }
             }
             return
         }

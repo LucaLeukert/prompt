@@ -9,9 +9,11 @@ enum GhosttyAppKitHooks {
     static var overlay: ((Ghostty.SurfaceView) -> AnyView?)?
     static var topBar: ((Ghostty.SurfaceView) -> AnyView?)?
     static var bottomBar: ((Ghostty.SurfaceView) -> AnyView?)?
+    static var leftMouseDownTarget: ((NSEvent) -> Ghostty.SurfaceView?)?
     static var surfaceDidClose: ((Ghostty.SurfaceView) -> Void)?
     static var surfaceDidClick: ((Ghostty.SurfaceView) -> Void)?
     static var keyDown: ((Ghostty.SurfaceView, NSEvent, Bool) -> Bool)?
     static var terminalDidReset: ((Ghostty.SurfaceView) -> Void)?
     static var commandDidFinish: ((Ghostty.SurfaceView, Int, UInt64) -> Void)?
+    static var childDidExit: ((Ghostty.SurfaceView, Int) -> Bool)?
 }

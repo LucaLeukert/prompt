@@ -4,7 +4,9 @@
 DerivedData/
 build/
 Artifacts/
+Prompt.xcodeproj/
 *.xcresult
+xcuserdata/
 *.mov
 *.profraw
 .DS_Store

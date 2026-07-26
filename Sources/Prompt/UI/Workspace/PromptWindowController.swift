@@ -12,77 +12,170 @@ enum PromptTheme {
     static let accent = Color(red: 0.063, green: 0.639, blue: 0.498)
 }
 
-enum PromptKeyboardFocusRouting {
-    @MainActor
-    static func preservesEditableControl(_ responder: NSResponder?) -> Bool {
-        if let textView = responder as? NSTextView { return textView.isEditable }
-        if let textField = responder as? NSTextField { return textField.isEditable && textField.isEnabled }
-        return false
+@MainActor
+final class PromptPaneHitRegionRegistry: ObservableObject {
+    private final class WeakRegion {
+        weak var view: NSView?
+
+        init(_ view: NSView) {
+            self.view = view
+        }
+    }
+
+    private var regions: [PromptPane.ID: WeakRegion] = [:]
+    @Published private(set) var frames: [PromptPane.ID: CGRect] = [:]
+
+    func register(_ view: NSView, for paneID: PromptPane.ID) {
+        regions[paneID] = WeakRegion(view)
+        updateFrame(of: view, for: paneID)
+    }
+
+    func unregister(_ view: NSView, for paneID: PromptPane.ID) {
+        guard regions[paneID]?.view === view else { return }
+        regions.removeValue(forKey: paneID)
+        frames.removeValue(forKey: paneID)
+    }
+
+    func updateFrame(of view: NSView, for paneID: PromptPane.ID) {
+        guard view.window != nil else { return }
+        let frame = view.convert(view.bounds, to: nil)
+        guard frames[paneID] != frame else { return }
+        frames[paneID] = frame
+    }
+
+    func paneID(at event: NSEvent) -> PromptPane.ID? {
+        guard let eventWindow = event.window else { return nil }
+        regions = regions.filter { $0.value.view != nil }
+        return regions.first { _, region in
+            guard let view = region.view,
+                  !view.isHidden,
+                  view.window === eventWindow else { return false }
+            return view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+        }?.key
     }
 }
 
-/// Keeps AppKit's responder chain aligned with Prompt's input model.
-///
-/// Ghostty surfaces are native AppKit views embedded in SwiftUI. SwiftUI can
-/// leave a sidebar control (or a previously focused surface) as first
-/// responder after the visible workspace has changed. That makes ordinary
-/// typing appear to disappear. The command palette is the one exception: it
-/// owns keyboard input for its complete lifetime, including its Cmd-K actions
-/// popover.
+private final class PromptPaneHitRegionView: NSView {
+    let paneID: PromptPane.ID
+    weak var registry: PromptPaneHitRegionRegistry?
+
+    init(paneID: PromptPane.ID, registry: PromptPaneHitRegionRegistry) {
+        self.paneID = paneID
+        self.registry = registry
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            registry?.register(self, for: paneID)
+        } else {
+            registry?.unregister(self, for: paneID)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        registry?.updateFrame(of: self, for: paneID)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+private struct PromptPaneHitRegion: NSViewRepresentable {
+    let paneID: PromptPane.ID
+    let registry: PromptPaneHitRegionRegistry
+
+    func makeNSView(context: Context) -> PromptPaneHitRegionView {
+        PromptPaneHitRegionView(paneID: paneID, registry: registry)
+    }
+
+    func updateNSView(_ view: PromptPaneHitRegionView, context: Context) {}
+
+    static func dismantleNSView(_ view: PromptPaneHitRegionView, coordinator: ()) {
+        view.registry?.unregister(view, for: view.paneID)
+    }
+}
+
 @MainActor
 private final class PromptWindow: NSWindow {
     weak var workspaceStore: PromptWorkspaceStore?
 
+    @discardableResult
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        guard accepted,
+              let workspaceStore,
+              let surface = PromptTerminalSurface.find(containing: responder as? NSView),
+              let paneID = workspaceStore.runtime.paneID(forSurfaceID: surface.id),
+              let session = workspaceStore.workspace.sessions.first(where: {
+                  $0.splitTree.panes.contains(where: { $0.id == paneID })
+              }) else { return accepted }
+        // Ghostty calls this while its local mouse monitor is transferring
+        // first-responder status. Defer publishing SwiftUI state until AppKit
+        // has finished that responder transition.
+        DispatchQueue.main.async { [weak workspaceStore] in
+            workspaceStore?.focusFromSurface(sessionID: session.id, paneID: paneID)
+        }
+        return accepted
+    }
+
     override func sendEvent(_ event: NSEvent) {
-        guard event.type == .keyDown, let workspaceStore else {
+        guard [.keyDown, .keyUp, .flagsChanged].contains(event.type),
+              let workspaceStore else {
             super.sendEvent(event)
             return
         }
 
-        if workspaceStore.isCommandPalettePresented {
-            // Some palette pages (for example the sidebar editor) intentionally
-            // have no text field. Their local monitors handle navigation; do
-            // not let any unhandled characters fall through to the terminal.
-            guard focusPaletteInputIfAvailable() else { return }
-        } else if !PromptKeyboardFocusRouting.preservesEditableControl(firstResponder),
-                  let session = workspaceStore.workspace.sessions.first(where: {
-            $0.id == workspaceStore.workspace.focusedSessionID
-        }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
-            // Application shortcuts are consumed by the local shortcut router
-            // before they arrive here. Reclaim terminal focus after sidebar
-            // interactions, but preserve SwiftUI's field editor while a
-            // composer or command-bar field owns keyboard input.
+        switch workspaceStore.inputRouter.route(
+            event,
+            editableControlIsFocused: editableControlIsFocused) {
+        case .consume:
+            return
+        case .focusedControl:
+            guard focusOwnedInputIfNeeded() else { return }
+        case .activeSession:
+            guard let session = workspaceStore.workspace.sessions.first(where: {
+                $0.id == workspaceStore.workspace.focusedSessionID
+            }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) else { return }
             surface.focus()
         }
 
         super.sendEvent(event)
     }
 
+    private var editableControlIsFocused: Bool {
+        if let textView = firstResponder as? NSTextView { return textView.isEditable }
+        if let textField = firstResponder as? NSTextField {
+            return textField.isEditable && textField.isEnabled
+        }
+        return false
+    }
+
     @discardableResult
-    private func focusPaletteInputIfAvailable() -> Bool {
-        // The palette's search and folder-path fields are native NSTextFields.
-        // Focusing the visible editable field immediately before dispatching
-        // each event closes the SwiftUI/AppKit focus race and prevents the
-        // underlying terminal from receiving palette input.
+    private func focusOwnedInputIfNeeded() -> Bool {
         guard let field = firstVisibleEditableTextField(in: contentView) else { return false }
-        // NSTextField uses a shared NSTextView field editor as the actual
-        // first responder. Calling makeFirstResponder on an already active
-        // field selects its full contents, so doing that for every keyDown
-        // turns typing "hello" into five replacements. Only reclaim focus
-        // after it has genuinely moved outside the palette field.
         if firstResponder !== field, firstResponder !== field.currentEditor() {
             makeFirstResponder(field)
+            if let editor = field.currentEditor() {
+                editor.selectedRange = NSRange(location: field.stringValue.utf16.count, length: 0)
+            }
         }
         return true
     }
 
     private func firstVisibleEditableTextField(in view: NSView?) -> NSTextField? {
         guard let view, !view.isHidden else { return nil }
+        // SwiftUI appends overlays after the content they cover. Walk the
+        // hierarchy front-to-back so an action menu's search field wins over
+        // the still-visible palette search field behind it.
+        for subview in view.subviews.reversed() {
+            if let field = firstVisibleEditableTextField(in: subview) { return field }
+        }
         if let field = view as? NSTextField, field.isEditable, field.isEnabled {
             return field
-        }
-        for subview in view.subviews {
-            if let field = firstVisibleEditableTextField(in: subview) { return field }
         }
         return nil
     }
@@ -146,17 +239,6 @@ private struct PromptWorkspaceView: View {
                 surface: focusedSurface,
                 isPresented: $store.isCommandPalettePresented)
         }
-        .background {
-            HStack {
-                ForEach(0 ..< 9, id: \.self) { index in
-                    Button { store.focusSidebarSession(at: index) } label: { Color.clear }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
-                }
-            }
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-        }
     }
 
     private var focusedSurface: PromptTerminalSurface? {
@@ -167,9 +249,14 @@ private struct PromptWorkspaceView: View {
 
 private struct PromptSessionSidebar: View {
     @ObservedObject var store: PromptWorkspaceStore
+    @ObservedObject private var inputRouter: PromptInputRouter
     @State private var collapsedGroups: Set<String> = []
-    @StateObject private var commandKey = PromptCommandKeyMonitor()
     @State private var hoveredGroup: String?
+
+    init(store: PromptWorkspaceStore) {
+        self.store = store
+        inputRouter = store.inputRouter
+    }
 
     private var groups: [(String, [PromptSession])] {
         var result: [(String, [PromptSession])] = []
@@ -219,7 +306,7 @@ private struct PromptSessionSidebar: View {
                 LazyVStack(alignment: .leading, spacing: 5) {
                     if store.sidebarLayout == .flat {
                         ForEach(Array(store.orderedSessions.enumerated()), id: \.element.id) { index, session in
-                            sessionRow(session, shortcut: commandKey.isPressed && index < 9 ? index + 1 : nil, grouped: false)
+                            sessionRow(session, shortcut: inputRouter.isCommandKeyPressed && index < 9 ? index + 1 : nil, grouped: false)
                                 .draggable(PromptSessionDragPayload(id: session.id))
                                 .modifier(PromptSessionDropTarget(store: store, target: session.id, folder: store.folder(for: session)))
                         }
@@ -245,7 +332,7 @@ private struct PromptSessionSidebar: View {
                                     VStack(spacing: 2) {
                                         ForEach(sessions) { session in
                                             let index = visibleSessions.firstIndex(where: { $0.id == session.id })
-                                            sessionRow(session, shortcut: commandKey.isPressed ? index.flatMap { $0 < 9 ? $0 + 1 : nil } : nil, grouped: true)
+                                            sessionRow(session, shortcut: inputRouter.isCommandKeyPressed ? index.flatMap { $0 < 9 ? $0 + 1 : nil } : nil, grouped: true)
                                                 .draggable(PromptSessionDragPayload(id: session.id))
                                                 .modifier(PromptSessionDropTarget(store: store, target: session.id, folder: store.sidebarFolders.contains(name) ? name : nil))
                                                 .onHover { hovering in
@@ -297,6 +384,7 @@ private struct PromptSessionSidebar: View {
 private struct PromptSidebarSessionRow: View {
     @ObservedObject var store: PromptWorkspaceStore
     @ObservedObject private var runtime: PromptTerminalRuntime
+    @ObservedObject private var paneHitRegions: PromptPaneHitRegionRegistry
     @ObservedObject private var promptModel = PromptModel.shared
     let session: PromptSession
     let shortcut: Int?
@@ -309,6 +397,7 @@ private struct PromptSidebarSessionRow: View {
     init(store: PromptWorkspaceStore, session: PromptSession, shortcut: Int?, grouped: Bool) {
         self.store = store
         self.runtime = store.runtime
+        self.paneHitRegions = store.runtime.paneHitRegions
         self.session = session
         self.shortcut = shortcut
         self.grouped = grouped
@@ -337,10 +426,19 @@ private struct PromptSidebarSessionRow: View {
     }
     private var metadata: String {
         let path = abbreviated(directory)
-        if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
-            return "\(path)  ·  git:\(branch)"
+        let prefix = session.configuration.localTypeLabel.map { "\($0)  ·  " } ?? ""
+        if let identity = session.configuration.containerIdentity {
+            return "\(prefix)\(identity)  ·  \(path)"
         }
-        return path
+        if let repository = session.configuration.worktreeRepository {
+            let repo = URL(fileURLWithPath: repository).lastPathComponent
+            let branch = session.configuration.worktreeBranch ?? runtime.localGitBranches[session.focusedPaneID]
+            return "\(prefix)\(repo)" + (branch.map { "  ·  git:\($0)" } ?? "")
+        }
+        if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+            return "\(prefix)\(path)  ·  git:\(branch)"
+        }
+        return prefix + path
     }
 
     private enum AgentKind {
@@ -411,27 +509,34 @@ private struct PromptSidebarSessionRow: View {
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
 
-            if pullRequest != nil || shortcut != nil {
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
-                    if let pullRequest {
-                        Link(destination: pullRequest.url) {
-                            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                                Image(systemName: "arrow.triangle.pull")
-                                    .font(.system(size: 9, weight: .semibold))
-                                Text("\(pullRequest.number)")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            }
-                            .foregroundStyle(pullRequestColor)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help("\(pullRequest.title) · Open on GitHub")
-                    }
-                    if let shortcut { shortcutLabel }
+            HStack(alignment: .center, spacing: 7) {
+                if session.splitTree.paneCount > 1 {
+                    PromptSidebarLayoutIndicator(
+                        tree: session.splitTree,
+                        focusedPaneID: session.focusedPaneID,
+                        paneFrames: paneHitRegions.frames)
+                        .frame(width: 20, height: 14)
+                        .help("Current pane layout")
                 }
-                .padding(.trailing, 8)
-                .padding(.top, 8)
+
+                if let pullRequest {
+                    Link(destination: pullRequest.url) {
+                        HStack(alignment: .firstTextBaseline, spacing: 3) {
+                            Image(systemName: "arrow.triangle.pull")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text("\(pullRequest.number)")
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        }
+                        .foregroundStyle(pullRequestColor)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(pullRequest.title) · Open on GitHub")
+                }
+                if let shortcut { shortcutLabel }
             }
+            .padding(.trailing, 8)
+            .padding(.top, 7)
         }
         .onHover {
             hovering = $0
@@ -482,11 +587,14 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var standardRow: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: remoteConnectionState?.isOffline == true ? "wifi.exclamationmark" : (session.configuration.isRemote ? "network" : "terminal"))
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: remoteConnectionState?.isOffline == true
+                ? "wifi.exclamationmark"
+                : session.configuration.sidebarIcon)
                 .font(.system(size: 14))
-                .foregroundStyle(remoteConnectionState?.isOffline == true ? Color.red : Color.secondary)
-                .frame(width: 18).padding(.top, 2)
+                .foregroundStyle(session.configuration.isPrivileged ? Color.orange : (remoteConnectionState?.isOffline == true ? Color.red : Color.secondary))
+                .frame(width: 18, height: 18, alignment: .center)
+                .help(session.configuration.sidebarSummary)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(displayTitle).font(.system(size: 14, weight: .semibold)).lineLimit(1)
@@ -502,32 +610,31 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private func agentRow(_ kind: AgentKind) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .center, spacing: 10) {
             CodexMark()
                 .frame(width: 18, height: 18)
-                .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 4)
-                if agentActivity?.isWorking == true || runtime.localCodexThreads[session.focusedPaneID]?.isWorking == true { ProgressView().controlSize(.mini) }
-                if let startedAt, agentActivity?.isWorking == true {
-                    TimelineView(.periodic(from: .now, by: 60)) { _ in
-                        Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    Text(agentHeadline).font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if agentActivity?.isWorking == true || runtime.localCodexThreads[session.focusedPaneID]?.isWorking == true { ProgressView().controlSize(.mini) }
+                    if let startedAt, agentActivity?.isWorking == true {
+                        TimelineView(.periodic(from: .now, by: 60)) { _ in
+                            Text(startedAt, style: .relative).font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                        }
                     }
                 }
-            }
-            .padding(.trailing, headerAccessoryInset)
-            HStack(spacing: 6) {
-                if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
-                    Text(branch)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .lineLimit(1)
-                } else {
-                    Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                .padding(.trailing, headerAccessoryInset)
+                HStack(spacing: 6) {
+                    if let branch = remoteStatus?.gitBranch ?? runtime.localGitBranches[session.focusedPaneID] {
+                        Text(branch)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .lineLimit(1)
+                    } else {
+                        Text(abbreviated(directory)).font(.system(size: 11, design: .monospaced)).lineLimit(1)
+                    }
                 }
-            }
-            .foregroundStyle(.tertiary)
+                .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 10)
@@ -544,11 +651,12 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var headerAccessoryInset: CGFloat {
+        let layoutInset: CGFloat = session.splitTree.paneCount > 1 ? 32 : 0
         switch (pullRequest != nil, shortcut != nil) {
-        case (true, true): return 50
-        case (true, false): return 24
-        case (false, true): return 24
-        case (false, false): return 0
+        case (true, true): return layoutInset + 50
+        case (true, false): return layoutInset + 24
+        case (false, true): return layoutInset + 24
+        case (false, false): return layoutInset
         }
     }
 
@@ -633,17 +741,180 @@ private struct PromptSidebarSessionRow: View {
     }
 
     private var metadataLine: some View {
-        HStack(spacing: 5) {
-            Text(metadata)
-                .font(.system(size: 10, design: .monospaced))
-                .lineLimit(1)
-            let panes = remoteStatus?.paneCount ?? session.splitTree.paneCount
-            if panes > 1 { Text("· \(panes) panes").font(.system(size: 10)) }
-        }.foregroundStyle(.tertiary)
+        Text(metadata)
+            .font(.system(size: 10, design: .monospaced))
+            .lineLimit(1)
+            .foregroundStyle(.tertiary)
     }
 
     private func abbreviated(_ path: String) -> String {
         path.promptDisplayPath
+    }
+}
+
+private struct PromptSidebarLayoutIndicator: View {
+    let tree: PromptSplitTree
+    let focusedPaneID: PromptPane.ID
+    let paneFrames: [PromptPane.ID: CGRect]
+
+    private let gap: CGFloat = 2.5
+    private let cornerRadius: CGFloat = 1
+    private let minimumChipExtent: CGFloat = 3
+
+    var body: some View {
+        Canvas { context, size in
+            let bounds = CGRect(origin: .zero, size: size)
+            let panes = livePaneRects(in: bounds) ?? paneRects(tree, in: bounds)
+
+            for pane in panes {
+                let isFocused = pane.id == focusedPaneID
+                let chip = readableChip(for: pane.rect, in: bounds)
+                let path = Path(roundedRect: chip, cornerRadius: cornerRadius)
+
+                context.fill(
+                    path,
+                    with: .color(Color.white.opacity(isFocused ? 0.62 : 0.12)))
+                context.stroke(
+                    path,
+                    with: .color(Color.white.opacity(isFocused ? 0.85 : 0.22)),
+                    lineWidth: isFocused ? 0.75 : 0.5)
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(
+            "Pane layout, \(tree.paneCount) panes, focused pane \(focusedPaneNumber)")
+    }
+
+    private var focusedPaneNumber: Int {
+        (tree.panes.firstIndex(where: { $0.id == focusedPaneID }) ?? 0) + 1
+    }
+
+    private func readableChip(for paneRect: CGRect, in bounds: CGRect) -> CGRect {
+        let available = bounds.insetBy(dx: gap / 2, dy: gap / 2)
+        let width = min(max(paneRect.width - gap, minimumChipExtent), available.width)
+        let height = min(max(paneRect.height - gap, minimumChipExtent), available.height)
+        let x = min(
+            max(paneRect.midX - width / 2, available.minX),
+            available.maxX - width)
+        let y = min(
+            max(paneRect.midY - height / 2, available.minY),
+            available.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private func livePaneRects(
+        in bounds: CGRect
+    ) -> [(id: PromptPane.ID, rect: CGRect)]? {
+        let panes = tree.panes
+        let live = panes.compactMap { pane -> (PromptPane.ID, CGRect)? in
+            guard let frame = paneFrames[pane.id],
+                  frame.width > 0,
+                  frame.height > 0 else { return nil }
+            return (pane.id, frame)
+        }
+        guard live.count == panes.count,
+              var union = live.first?.1 else { return nil }
+        for (_, frame) in live.dropFirst() {
+            union = union.union(frame)
+        }
+        guard union.width > 0, union.height > 0 else { return nil }
+
+        return live.map { id, frame in
+            let x = bounds.minX + ((frame.minX - union.minX) / union.width) * bounds.width
+            // AppKit window coordinates rise from the bottom; Canvas
+            // coordinates rise from the top.
+            let y = bounds.minY + ((union.maxY - frame.maxY) / union.height) * bounds.height
+            return (
+                id,
+                CGRect(
+                    x: x,
+                    y: y,
+                    width: (frame.width / union.width) * bounds.width,
+                    height: (frame.height / union.height) * bounds.height))
+        }
+    }
+
+    private func paneRects(
+        _ node: PromptSplitTree,
+        in rect: CGRect
+    ) -> [(id: PromptPane.ID, rect: CGRect)] {
+        switch node {
+        case .leaf(let pane):
+            return [(pane.id, rect)]
+        case .split(let axis, let fraction, let first, let second):
+            let ratio = min(max(fraction, 0), 1)
+            if axis == .horizontal {
+                let firstWidth = rect.width * ratio
+                let firstRect = CGRect(
+                    x: rect.minX,
+                    y: rect.minY,
+                    width: firstWidth,
+                    height: rect.height)
+                let secondRect = CGRect(
+                    x: rect.minX + firstWidth,
+                    y: rect.minY,
+                    width: rect.width - firstWidth,
+                    height: rect.height)
+                return paneRects(first, in: firstRect) + paneRects(second, in: secondRect)
+            }
+
+            let firstHeight = rect.height * ratio
+            let firstRect = CGRect(
+                x: rect.minX,
+                y: rect.minY,
+                width: rect.width,
+                height: firstHeight)
+            let secondRect = CGRect(
+                x: rect.minX,
+                y: rect.minY + firstHeight,
+                width: rect.width,
+                height: rect.height - firstHeight)
+            return paneRects(first, in: firstRect) + paneRects(second, in: secondRect)
+        }
+    }
+
+    private func splitDividers(_ node: PromptSplitTree, in rect: CGRect) -> [Path] {
+        guard case .split(let axis, let fraction, let first, let second) = node else {
+            return []
+        }
+        let ratio = min(max(fraction, 0), 1)
+        var divider = Path()
+
+        if axis == .horizontal {
+            let splitX = rect.minX + rect.width * ratio
+            divider.move(to: CGPoint(x: splitX, y: rect.minY))
+            divider.addLine(to: CGPoint(x: splitX, y: rect.maxY))
+            let firstRect = CGRect(
+                x: rect.minX,
+                y: rect.minY,
+                width: splitX - rect.minX,
+                height: rect.height)
+            let secondRect = CGRect(
+                x: splitX,
+                y: rect.minY,
+                width: rect.maxX - splitX,
+                height: rect.height)
+            return [divider]
+                + splitDividers(first, in: firstRect)
+                + splitDividers(second, in: secondRect)
+        }
+
+        let splitY = rect.minY + rect.height * ratio
+        divider.move(to: CGPoint(x: rect.minX, y: splitY))
+        divider.addLine(to: CGPoint(x: rect.maxX, y: splitY))
+        let firstRect = CGRect(
+            x: rect.minX,
+            y: rect.minY,
+            width: rect.width,
+            height: splitY - rect.minY)
+        let secondRect = CGRect(
+            x: rect.minX,
+            y: splitY,
+            width: rect.width,
+            height: rect.maxY - splitY)
+        return [divider]
+            + splitDividers(first, in: firstRect)
+            + splitDividers(second, in: secondRect)
     }
 }
 
@@ -670,31 +941,15 @@ private final class PromptMouseTransparentView: NSView {
 private struct CodexMark: View {
     var body: some View {
         Group {
-            if let url = Bundle.main.url(forResource: "ChatGPTMark", withExtension: "svg", subdirectory: "Fonts"),
+            if let url = Bundle.main.url(forResource: "OpenAIBlossom", withExtension: "svg", subdirectory: "Fonts"),
                let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().renderingMode(.template).aspectRatio(contentMode: .fit)
+                Image(nsImage: image).resizable().renderingMode(.original).aspectRatio(contentMode: .fit)
             } else {
                 Image(systemName: "circle.hexagongrid.fill").resizable().aspectRatio(contentMode: .fit)
             }
         }
-        .foregroundStyle(.white)
         .accessibilityLabel("Codex")
     }
-}
-
-@MainActor
-private final class PromptCommandKeyMonitor: ObservableObject {
-    @Published var isPressed = false
-    private var monitor: Any?
-
-    init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp]) { [weak self] event in
-            self?.isPressed = event.modifierFlags.contains(.command)
-            return event
-        }
-    }
-
-    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 }
 
 struct PromptSessionDragPayload: Codable, Transferable {
@@ -755,22 +1010,194 @@ private struct PromptSplitNodeView: View {
         switch tree {
         case .leaf(let pane):
             if let surface = store.runtime.surface(for: pane.id) {
-                PromptHostedTerminalView(surface: surface, paneID: pane.id, runtime: store.runtime)
-                    .id(pane.id)
-                    .onTapGesture { store.focus(sessionID: session.id, paneID: pane.id) }
+                GeometryReader { geometry in
+                    PromptHostedTerminalView(
+                        surface: surface,
+                        paneID: pane.id,
+                        runtime: store.runtime)
+                        .id(pane.id)
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .modifier(PromptPaneDropTarget(
+                            store: store,
+                            sessionID: session.id,
+                            targetPaneID: pane.id))
+                        .contentShape(Rectangle())
+                        .background(PromptPaneHitRegion(
+                            paneID: pane.id,
+                            registry: store.runtime.paneHitRegions))
+                        .clipped()
+                }
             }
-        case .split(let axis, _, let first, let second):
+        case .split(let axis, let fraction, let first, let second):
             if axis == .horizontal {
                 HSplitView {
                     PromptSplitNodeView(store: store, session: session, tree: first)
+                        .frame(
+                            minWidth: 80,
+                            idealWidth: max(80, CGFloat(fraction) * 1_000),
+                            maxWidth: .infinity,
+                            maxHeight: .infinity)
                     PromptSplitNodeView(store: store, session: session, tree: second)
+                        .frame(
+                            minWidth: 80,
+                            idealWidth: max(80, CGFloat(1 - fraction) * 1_000),
+                            maxWidth: .infinity,
+                            maxHeight: .infinity)
                 }
             } else {
                 VSplitView {
                     PromptSplitNodeView(store: store, session: session, tree: first)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 80,
+                            idealHeight: max(80, CGFloat(fraction) * 1_000),
+                            maxHeight: .infinity)
                     PromptSplitNodeView(store: store, session: session, tree: second)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: 80,
+                            idealHeight: max(80, CGFloat(1 - fraction) * 1_000),
+                            maxHeight: .infinity)
                 }
             }
+        }
+    }
+}
+
+private struct PromptPaneDropTarget: ViewModifier {
+    let store: PromptWorkspaceStore
+    let sessionID: PromptSession.ID
+    let targetPaneID: PromptPane.ID
+    @State private var dropState = PromptPaneDropState.idle
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                GeometryReader { geometry in
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onDrop(
+                            of: [.ghosttySurfaceId],
+                            delegate: PromptPaneDropDelegate(
+                                dropState: $dropState,
+                                viewSize: geometry.size,
+                                store: store,
+                                sessionID: sessionID,
+                                targetPaneID: targetPaneID))
+                }
+            }
+            .overlay {
+                if case .dropping(let zone) = dropState {
+                    PromptPaneDropPreview(zone: zone)
+                        .padding(5)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+    }
+}
+
+private enum PromptPaneDropState: Equatable {
+    case idle
+    case dropping(PromptPaneDropZone)
+}
+
+private struct PromptPaneDropDelegate: DropDelegate {
+    @Binding var dropState: PromptPaneDropState
+    let viewSize: CGSize
+    let store: PromptWorkspaceStore
+    let sessionID: PromptSession.ID
+    let targetPaneID: PromptPane.ID
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [.ghosttySurfaceId])
+    }
+
+    func dropEntered(info: DropInfo) {
+        withAnimation(.easeOut(duration: 0.1)) {
+            dropState = .dropping(Self.zone(at: info.location, in: viewSize))
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard case .dropping = dropState else {
+            return DropProposal(operation: .forbidden)
+        }
+        dropState = .dropping(Self.zone(at: info.location, in: viewSize))
+        return DropProposal(operation: .move)
+    }
+
+    func dropExited(info: DropInfo) {
+        withAnimation(.easeOut(duration: 0.1)) { dropState = .idle }
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        let dropZone = Self.zone(at: info.location, in: viewSize)
+        dropState = .idle
+        guard let provider = info.itemProviders(for: [.ghosttySurfaceId]).first else { return false }
+
+        provider.loadDataRepresentation(forTypeIdentifier: UTType.ghosttySurfaceId.identifier) { data, _ in
+            guard let data, data.count == MemoryLayout<uuid_t>.size else { return }
+            var bytes: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            _ = withUnsafeMutableBytes(of: &bytes) { data.copyBytes(to: $0) }
+            let surfaceID = UUID(uuid: bytes)
+            DispatchQueue.main.async {
+                _ = store.movePane(
+                    in: sessionID,
+                    sourceSurfaceID: surfaceID,
+                    relativeTo: targetPaneID,
+                    zone: dropZone)
+            }
+        }
+        return true
+    }
+
+    static func zone(at point: CGPoint, in size: CGSize) -> PromptPaneDropZone {
+        guard size.width > 0, size.height > 0 else { return .right }
+        let relativeX = point.x / size.width
+        let relativeY = point.y / size.height
+        if (0.25 ... 0.75).contains(relativeX), (0.25 ... 0.75).contains(relativeY) {
+            return .center
+        }
+        let distances: [(PromptPaneDropZone, CGFloat)] = [
+            (.left, point.x),
+            (.right, size.width - point.x),
+            (.top, point.y),
+            (.bottom, size.height - point.y),
+        ]
+        return distances.min(by: { $0.1 < $1.1 })?.0 ?? .right
+    }
+}
+
+private struct PromptPaneDropPreview: View {
+    let zone: PromptPaneDropZone
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color(red: 0.02, green: 0.48, blue: 0.95).opacity(0.28))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color(red: 0.05, green: 0.58, blue: 1), lineWidth: 2)
+                }
+                .frame(
+                    width: zone == .left || zone == .right ? size.width / 2 : size.width,
+                    height: zone == .top || zone == .bottom ? size.height / 2 : size.height)
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: .infinity,
+                    alignment: alignment)
+        }
+    }
+
+    private var alignment: Alignment {
+        switch zone {
+        case .center: .center
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .leading
+        case .right: .trailing
         }
     }
 }
@@ -779,6 +1206,66 @@ extension PromptSessionConfiguration {
     var isRemote: Bool {
         if case .remote = self { return true }
         return false
+    }
+
+    var isAnchored: Bool {
+        guard case .local(let local) = self else { return false }
+        return local.behavior == .anchored
+    }
+
+    var isPrivileged: Bool {
+        guard case .local(let local) = self else { return false }
+        return local.behavior == .privileged
+    }
+
+    var localTypeLabel: String? {
+        guard case .local(let local) = self else { return nil }
+        switch local.behavior {
+        case .standard: return nil
+        case .anchored: return "Anchored"
+        case .task:
+            if let code = local.lastExitCode { return code == 0 ? "Completed" : "Failed \(code)" }
+            return "Task"
+        case .disposable: return "Disposable"
+        case .scratch: return "Scratch"
+        case .project: return "Project"
+        case .worktree: return "Worktree"
+        case .container: return "Container"
+        case .privileged: return "PRIVILEGED"
+        }
+    }
+
+    var sidebarIcon: String {
+        switch self {
+        case .remote: return "network"
+        case .local(let local):
+            switch local.behavior {
+            case .standard: return "terminal"
+            case .anchored: return "pin"
+            case .task: return local.lastExitCode.map { $0 == 0 ? "checkmark.circle" : "xmark.circle" } ?? "play.circle"
+            case .disposable: return "timer"
+            case .scratch: return "square.dashed"
+            case .project: return "folder"
+            case .worktree: return "arrow.triangle.branch"
+            case .container: return "shippingbox"
+            case .privileged: return "lock.shield"
+            }
+        }
+    }
+
+    var containerIdentity: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.composeService.map { "compose:\($0)" } ?? local.details?.container
+    }
+
+    var worktreeRepository: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.repository
+    }
+
+    var worktreeBranch: String? {
+        guard case .local(let local) = self else { return nil }
+        return local.details?.branch
     }
 
     var sidebarMachine: String {
@@ -793,8 +1280,10 @@ extension PromptSessionConfiguration {
     }
     var sidebarSummary: String {
         switch self {
-        case .local(let local): local.command.map { "Local · \($0)" } ?? "Local shell"
-        case .remote(let remote): "SSH · \(remote.destination) · persistent"
+        case .local(let local):
+            let type = localTypeLabel ?? "Local"
+            return local.command.map { "\(type) · \($0)" } ?? "\(type) shell"
+        case .remote(let remote): return "SSH · \(remote.destination) · persistent"
         }
     }
 }

@@ -7,6 +7,18 @@ import Testing
 
 @Suite("Prompt AI integration")
 struct PromptAITests {
+    @Test @MainActor func currentDirectoryActionsKeepSpecializedSessionTypesOutOfTheRootPalette() {
+        #expect(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.title) == [
+            "Anchored session",
+            "Run task…",
+            "Disposable session…",
+            "Scratch workspace",
+            "Privileged session…",
+            "Codex agent",
+        ])
+        #expect(Set(PromptSessionLauncher.CurrentDirectoryAction.allCases.map(\.icon)).count == 6)
+    }
+
     @Test func tmuxControlOutputDecodesOctalAndEscapedBackslashes() {
         #expect(PromptTmuxControlParser.decode(#"hello\015\012path\\name"#) == Array("hello\r\npath\\name".utf8))
     }
@@ -97,6 +109,19 @@ struct PromptAITests {
         #expect(first != second)
         #expect(PromptSessionLauncher.isSafeSession(first))
         #expect(PromptSessionLauncher.isSafeSession(second))
+    }
+
+    @Test @MainActor func recentRemoteSessionsKeepOnlyTheNewestSessionPerHost() {
+        let sessions = [
+            PromptRemoteSession(destination: "pi.tailnet.ts.net", name: "pi.tailnet.ts.net", session: "new", directory: "/srv/new"),
+            PromptRemoteSession(destination: "build", name: "build", session: "build", directory: "/work"),
+            PromptRemoteSession(destination: "PI.TAILNET.TS.NET", name: "pi.tailnet.ts.net", session: "old", directory: "/srv/old"),
+        ]
+
+        let unique = PromptSessionLauncher.uniqueRemoteSessions(sessions)
+
+        #expect(unique.map(\.session) == ["new", "build"])
+        #expect(unique.first?.directory == "/srv/new")
     }
 
     @Test @MainActor func tailnetDiscoveryKeepsOnlinePeersWithReachableSSH() {
@@ -212,16 +237,14 @@ struct PromptAITests {
     }
 
     @Test func remoteAIExperimentIsDisabledUnlessExplicitlyEnabled() {
-        let suite = "PromptAITests.RemoteAIExperiment.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else {
-            Issue.record("Could not create an isolated UserDefaults suite")
-            return
-        }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("prompt-remote-ai-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let settings = PromptSettings(paths: PromptPaths(homeDirectory: home))
 
-        #expect(!PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
-        defaults.set(true, forKey: PromptExperimentalFeatures.remoteAIEnabledDefaultsKey)
-        #expect(PromptExperimentalFeatures.remoteAIEnabled(in: defaults))
+        #expect(!PromptExperimentalFeatures.remoteAIEnabled(in: settings))
+        settings.set(true, forKey: PromptExperimentalFeatures.remoteAIEnabledSettingKey)
+        #expect(PromptExperimentalFeatures.remoteAIEnabled(in: settings))
     }
 
     @Test func dynamicTerminalToolSpecsUseFunctionProtocol() {

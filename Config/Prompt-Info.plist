@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>command</string>
+				<string>tool</string>
+				<string>sh</string>
+				<string>zsh</string>
+				<string>csh</string>
+				<string>pl</string>
+			</array>
+			<key>CFBundleTypeName</key>
+			<string>Terminal scripts</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folders</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.directory</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Shell</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.unix-executable</string>
+			</array>
+		</dict>
+	</array>
+	<key>GhosttyBuild</key>
+	<string></string>
+	<key>GhosttyCommit</key>
+	<string></string>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>GHOSTTY_MAC_LAUNCH_SOURCE</key>
+		<string>app</string>
+	</dict>
+	<key>MDItemKeywords</key>
+	<string>Terminal</string>
+	<key>NSAppleScriptEnabled</key>
+	<true/>
+	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>PromptApplication</string>
+	<key>OSAScriptingDefinition</key>
+	<string>Ghostty.sdef</string>
+	<key>SUEnableAutomaticChecks</key>
+	<false/>
+	<key>SUPublicEDKey</key>
+	<string>wsNcGf5hirwtdXMVnYoxRIX/SqZQLMOsYlD3q3imeok=</string>
+</dict>
+</plist>

@@ -36,14 +36,86 @@ enum PromptSessionConfiguration: Codable, Equatable {
 }
 
 struct PromptLocalSessionConfiguration: Codable, Equatable {
+    enum Behavior: String, Codable {
+        case standard
+        case anchored
+        case task
+        case disposable
+        case scratch
+        case project
+        case worktree
+        case container
+        case privileged
+    }
+
     var workingDirectory: String
     var command: String?
     var environment: [String: String]
+    var behavior: Behavior
+    var details: PromptLocalSessionDetails?
+    var lastExitCode: Int32?
 
-    init(workingDirectory: String, command: String? = nil, environment: [String: String] = [:]) {
+    init(
+        workingDirectory: String,
+        command: String? = nil,
+        environment: [String: String] = [:],
+        behavior: Behavior = .standard,
+        details: PromptLocalSessionDetails? = nil,
+        lastExitCode: Int32? = nil
+    ) {
         self.workingDirectory = workingDirectory
         self.command = command
         self.environment = environment
+        self.behavior = behavior
+        self.details = details
+        self.lastExitCode = lastExitCode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case workingDirectory, command, environment, behavior, details, lastExitCode
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        workingDirectory = try values.decode(String.self, forKey: .workingDirectory)
+        command = try values.decodeIfPresent(String.self, forKey: .command)
+        environment = try values.decodeIfPresent([String: String].self, forKey: .environment) ?? [:]
+        behavior = try values.decodeIfPresent(Behavior.self, forKey: .behavior) ?? .standard
+        details = try values.decodeIfPresent(PromptLocalSessionDetails.self, forKey: .details)
+        lastExitCode = try values.decodeIfPresent(Int32.self, forKey: .lastExitCode)
+    }
+}
+
+struct PromptLocalSessionDetails: Codable, Equatable {
+    enum Ownership: String, Codable {
+        case prompt
+        case external
+    }
+
+    var repository: String?
+    var branch: String?
+    var worktreePath: String?
+    var worktreeOwnership: Ownership?
+    var scratchDirectory: String?
+    var container: String?
+    var composeService: String?
+
+    init(
+        repository: String? = nil,
+        branch: String? = nil,
+        worktreePath: String? = nil,
+        worktreeOwnership: Ownership? = nil,
+        scratchDirectory: String? = nil,
+        container: String? = nil,
+        composeService: String? = nil
+    ) {
+        self.repository = repository
+        self.branch = branch
+        self.worktreePath = worktreePath
+        self.worktreeOwnership = worktreeOwnership
+        self.scratchDirectory = scratchDirectory
+        self.container = container
+        self.composeService = composeService
     }
 }
 

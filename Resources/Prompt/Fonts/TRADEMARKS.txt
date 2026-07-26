@@ -1,0 +1,16 @@
+OpenAI Blossom
+==============
+
+The OpenAI Blossom logo in OpenAIBlossom.svg is owned by OpenAI. It was
+obtained from OpenAI's official logo package:
+
+https://cdn.openai.com/brand/openai-logos.zip
+
+Use of the logo is governed by OpenAI's brand guidelines and mark usage
+terms:
+
+https://openai.com/brand/
+
+The logo is not licensed under Prompt's MIT license. Prompt uses it only to
+identify the Codex integration. Prompt is an independent project and is not
+affiliated with, sponsored by, or endorsed by OpenAI.
