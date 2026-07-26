@@ -287,69 +287,6 @@ struct PromptPaletteReturnState: Equatable {
     let selectedIndex: UInt?
 }
 
-@MainActor
-final class PromptPaletteKeyboardRouter: ObservableObject {
-    enum Command {
-        case moveUp
-        case moveDown
-        case submit
-        case back
-        case delete
-        case actions
-        case textInput
-    }
-
-    private var activeOwner: UUID?
-    private var handler: ((Command) -> Bool)?
-
-    func claim(owner: UUID, handler: @escaping (Command) -> Bool) {
-        activeOwner = owner
-        self.handler = handler
-    }
-
-    func release(owner: UUID) {
-        guard activeOwner == owner else { return }
-        activeOwner = nil
-        handler = nil
-    }
-
-    func dispatch(_ command: Command) -> Bool {
-        handler?(command) == true
-    }
-
-    func handle(_ event: NSEvent) -> Bool {
-        guard let command = command(for: event) else {
-            _ = dispatch(.textInput)
-            return false
-        }
-        return dispatch(command)
-    }
-
-    private func command(for event: NSEvent) -> Command? {
-        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if modifiers == [.command], event.charactersIgnoringModifiers?.lowercased() == "k" {
-            return .actions
-        }
-        if modifiers == [.control] {
-            switch event.charactersIgnoringModifiers?.lowercased() {
-            case "p": return .moveUp
-            case "n": return .moveDown
-            default: return nil
-            }
-        }
-        guard modifiers.isEmpty else { return nil }
-        switch event.keyCode {
-        case 126: return .moveUp
-        case 125: return .moveDown
-        case 36, 76: return .submit
-        case 53: return .back
-        case 51: return .delete
-        default: return nil
-        }
-    }
-
-}
-
 struct PromptCommandPaletteContentView: View {
     @ObservedObject var store: PromptWorkspaceStore
     @Binding var isPresented: Bool
@@ -365,7 +302,7 @@ struct PromptCommandPaletteContentView: View {
     @State private var pointerLocationAtKeyboardNavigation: CGPoint?
     @State private var pointerTrackingStarted = false
     @State private var keyboardOwner = UUID()
-    @StateObject private var keyboard = PromptPaletteKeyboardRouter()
+    private var keyboard: PromptInputRouter { store.inputRouter }
 
     private var commandRoute: (title: String?, options: [PromptCommandOption]) {
         if case .some(.commands(let title, let options)) = navigation.current {
@@ -468,6 +405,7 @@ struct PromptCommandPaletteContentView: View {
                             }) { option in
                                 activate(option)
                             }
+                            .allowsHitTesting(!actionsArePresented)
 
                         Divider().opacity(0.55)
 
@@ -532,7 +470,6 @@ struct PromptCommandPaletteContentView: View {
         .padding()
         .environment(\.colorScheme, scheme)
         .onAppear {
-            store.commandPaletteKeyRouter = keyboard
             pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
             pointerTrackingStarted = true
             claimCommandKeyboard()
@@ -545,14 +482,8 @@ struct PromptCommandPaletteContentView: View {
                 resetNavigationState()
             }
         }
-        // The parent removes this view as soon as `isPresented` becomes false,
-        // so SwiftUI is not guaranteed to deliver the binding change above.
-        // Reset on disappearance as well to prevent a dismissed picker and its
-        // keyboard monitor from leaking into the next presentation.
         .onDisappear {
-            if store.commandPaletteKeyRouter === keyboard {
-                store.commandPaletteKeyRouter = nil
-            }
+            keyboard.release(owner: keyboardOwner)
             resetNavigationState()
         }
     }
@@ -586,7 +517,7 @@ struct PromptCommandPaletteContentView: View {
     }
 
     private func claimCommandKeyboard() {
-        keyboard.claim(owner: keyboardOwner) { command in
+        keyboard.claim(owner: keyboardOwner, acceptsTextInput: true) { command in
             switch command {
             case .moveUp:
                 moveSelectionUp()
@@ -655,7 +586,6 @@ struct PromptCommandPaletteContentView: View {
 
     private func dismissActions() {
         actionsArePresented = false
-        DispatchQueue.main.async { claimCommandKeyboard() }
     }
 
     private func goBack() {
@@ -668,7 +598,6 @@ struct PromptCommandPaletteContentView: View {
         DispatchQueue.main.async {
             isRestoringReturnState = false
         }
-        DispatchQueue.main.async { claimCommandKeyboard() }
     }
 
     private func push(_ route: PromptPaletteRoute) {
@@ -721,7 +650,7 @@ struct PromptPaletteSubmitGate {
 
 private struct PromptSidebarVisualEditor: View {
     @ObservedObject var store: PromptWorkspaceStore
-    let keyboard: PromptPaletteKeyboardRouter
+    let keyboard: PromptInputRouter
     let onBack: () -> Void
     @State private var selection: UUID?
     @State private var actionsVisible = false
@@ -864,7 +793,6 @@ private struct PromptSidebarVisualEditor: View {
 
     private func dismissActions() {
         actionsVisible = false
-        DispatchQueue.main.async { claimKeyboard() }
     }
 
     @ViewBuilder private func sessionMenu(_ session: PromptSession) -> some View { Button("Rename…") { rename(session) }; Menu("Move to group") { moveMenu(session) }; Divider(); Button("Close Session", role: .destructive) { store.closeSession(session.id) } }
@@ -1007,7 +935,7 @@ private struct GitPickerView: View {
 
     let configuration: PromptGitPickerConfiguration
     @Binding var isPresented: Bool
-    let keyboard: PromptPaletteKeyboardRouter
+    let keyboard: PromptInputRouter
     let onBack: () -> Void
 
     @State private var query = ""
@@ -1021,7 +949,7 @@ private struct GitPickerView: View {
     init(
         configuration: PromptGitPickerConfiguration,
         isPresented: Binding<Bool>,
-        keyboard: PromptPaletteKeyboardRouter,
+        keyboard: PromptInputRouter,
         onBack: @escaping () -> Void
     ) {
         self.configuration = configuration
@@ -1187,7 +1115,7 @@ private struct GitPickerView: View {
     }
 
     private func claimKeyboard() {
-        keyboard.claim(owner: keyboardOwner) { command in
+        keyboard.claim(owner: keyboardOwner, acceptsTextInput: true) { command in
             switch command {
             case .moveUp: moveSelection(-1)
             case .moveDown: moveSelection(1)
@@ -1330,7 +1258,7 @@ private struct GitTreeConnector: View {
 private struct FolderPickerView: View {
     let configuration: PromptFolderPickerConfiguration
     @Binding var isPresented: Bool
-    let keyboard: PromptPaletteKeyboardRouter
+    let keyboard: PromptInputRouter
     let onBack: () -> Void
 
     @State private var directory: String
@@ -1347,7 +1275,7 @@ private struct FolderPickerView: View {
     init(
         configuration: PromptFolderPickerConfiguration,
         isPresented: Binding<Bool>,
-        keyboard: PromptPaletteKeyboardRouter,
+        keyboard: PromptInputRouter,
         onBack: @escaping () -> Void
     ) {
         self.configuration = configuration
@@ -1570,7 +1498,11 @@ private struct FolderPickerView: View {
     }
 
     private func claimKeyboard() {
-        keyboard.claim(owner: keyboardOwner) { command in
+        keyboard.claim(
+            owner: keyboardOwner,
+            acceptsTextInput: true,
+            focusInput: { pathFocused = true }
+        ) { command in
             switch command {
             case .moveUp: moveSelection(.up)
             case .moveDown: moveSelection(.down)
@@ -1727,7 +1659,7 @@ private struct FolderPickerRow: View {
 
 private struct CommandActionsView: View {
     let option: PromptCommandOption
-    let keyboard: PromptPaletteKeyboardRouter
+    let keyboard: PromptInputRouter
     let onPrimary: () -> Void
     let onDismiss: () -> Void
     var customActions: [PromptCommandAction]? = nil
@@ -1842,7 +1774,11 @@ private struct CommandActionsView: View {
     }
 
     private func claimKeyboard() {
-        keyboard.claim(owner: keyboardOwner) { command in
+        keyboard.claim(
+            owner: keyboardOwner,
+            acceptsTextInput: true,
+            focusInput: { searchFocused = true }
+        ) { command in
             switch command {
             case .moveUp:
                 if !filteredActions.isEmpty {

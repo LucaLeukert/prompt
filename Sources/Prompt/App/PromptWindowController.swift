@@ -12,74 +12,47 @@ enum PromptTheme {
     static let accent = Color(red: 0.063, green: 0.639, blue: 0.498)
 }
 
-enum PromptKeyboardFocusRouting {
-    @MainActor
-    static func preservesEditableControl(_ responder: NSResponder?) -> Bool {
-        if let textView = responder as? NSTextView { return textView.isEditable }
-        if let textField = responder as? NSTextField { return textField.isEditable && textField.isEnabled }
-        return false
-    }
-
-}
-
-/// Keeps AppKit's responder chain aligned with Prompt's input model.
-///
-/// Ghostty surfaces are native AppKit views embedded in SwiftUI. SwiftUI can
-/// leave a sidebar control (or a previously focused surface) as first
-/// responder after the visible workspace has changed. That makes ordinary
-/// typing appear to disappear. The command palette is the one exception: it
-/// owns keyboard input for its complete lifetime, including its Cmd-K actions
-/// popover.
 @MainActor
 private final class PromptWindow: NSWindow {
     weak var workspaceStore: PromptWorkspaceStore?
 
     override func sendEvent(_ event: NSEvent) {
-        guard event.type == .keyDown, let workspaceStore else {
+        guard [.keyDown, .keyUp, .flagsChanged].contains(event.type),
+              let workspaceStore else {
             super.sendEvent(event)
             return
         }
 
-        if workspaceStore.isCommandPalettePresented {
-            // Resolve palette navigation before AppKit dispatches to the
-            // previous first responder. A focused Ghostty surface or field
-            // editor can therefore never claim arrows, Return, or Escape.
-            if workspaceStore.commandPaletteKeyRouter?.handle(event) == true { return }
-            // Some palette pages (for example the sidebar editor) intentionally
-            // have no text field. The palette router above handles navigation;
-            // do not let any unhandled characters fall through to the terminal.
-            guard focusPaletteInputIfAvailable() else { return }
-        } else if !PromptKeyboardFocusRouting.preservesEditableControl(firstResponder),
-                  let session = workspaceStore.workspace.sessions.first(where: {
-                      $0.id == workspaceStore.workspace.focusedSessionID
-                  }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) {
-            // Application shortcuts are consumed by the local shortcut router
-            // before they arrive here. Reclaim terminal focus after sidebar
-            // interactions, but preserve SwiftUI's field editor while a
-            // composer or command-bar field owns keyboard input.
+        switch workspaceStore.inputRouter.route(
+            event,
+            editableControlIsFocused: editableControlIsFocused) {
+        case .consume:
+            return
+        case .focusedControl:
+            guard focusOwnedInputIfNeeded() else { return }
+        case .activeSession:
+            guard let session = workspaceStore.workspace.sessions.first(where: {
+                $0.id == workspaceStore.workspace.focusedSessionID
+            }), let surface = workspaceStore.runtime.surface(for: session.focusedPaneID) else { return }
             surface.focus()
         }
 
         super.sendEvent(event)
     }
 
+    private var editableControlIsFocused: Bool {
+        if let textView = firstResponder as? NSTextView { return textView.isEditable }
+        if let textField = firstResponder as? NSTextField {
+            return textField.isEditable && textField.isEnabled
+        }
+        return false
+    }
+
     @discardableResult
-    private func focusPaletteInputIfAvailable() -> Bool {
-        // The palette's search and folder-path fields are native NSTextFields.
-        // Focusing the visible editable field immediately before dispatching
-        // each event closes the SwiftUI/AppKit focus race and prevents the
-        // underlying terminal from receiving palette input.
+    private func focusOwnedInputIfNeeded() -> Bool {
         guard let field = firstVisibleEditableTextField(in: contentView) else { return false }
-        // NSTextField uses a shared NSTextView field editor as the actual
-        // first responder. Calling makeFirstResponder on an already active
-        // field selects its full contents, so doing that for every keyDown
-        // turns typing "hello" into five replacements. Only reclaim focus
-        // after it has genuinely moved outside the palette field.
         if firstResponder !== field, firstResponder !== field.currentEditor() {
             makeFirstResponder(field)
-            // AppKit selects the entire value when a populated NSTextField
-            // becomes first responder. Folder paths are edited far more often
-            // by appending, so place the insertion point at the end instead.
             if let editor = field.currentEditor() {
                 editor.selectedRange = NSRange(location: field.stringValue.utf16.count, length: 0)
             }
@@ -89,11 +62,14 @@ private final class PromptWindow: NSWindow {
 
     private func firstVisibleEditableTextField(in view: NSView?) -> NSTextField? {
         guard let view, !view.isHidden else { return nil }
+        // SwiftUI appends overlays after the content they cover. Walk the
+        // hierarchy front-to-back so an action menu's search field wins over
+        // the still-visible palette search field behind it.
+        for subview in view.subviews.reversed() {
+            if let field = firstVisibleEditableTextField(in: subview) { return field }
+        }
         if let field = view as? NSTextField, field.isEditable, field.isEnabled {
             return field
-        }
-        for subview in view.subviews {
-            if let field = firstVisibleEditableTextField(in: subview) { return field }
         }
         return nil
     }
@@ -157,17 +133,6 @@ private struct PromptWorkspaceView: View {
                 surface: focusedSurface,
                 isPresented: $store.isCommandPalettePresented)
         }
-        .background {
-            HStack {
-                ForEach(0 ..< 9, id: \.self) { index in
-                    Button { store.focusSidebarSession(at: index) } label: { Color.clear }
-                        .buttonStyle(.plain)
-                        .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
-                }
-            }
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-        }
     }
 
     private var focusedSurface: PromptTerminalSurface? {
@@ -178,9 +143,14 @@ private struct PromptWorkspaceView: View {
 
 private struct PromptSessionSidebar: View {
     @ObservedObject var store: PromptWorkspaceStore
+    @ObservedObject private var inputRouter: PromptInputRouter
     @State private var collapsedGroups: Set<String> = []
-    @StateObject private var commandKey = PromptCommandKeyMonitor()
     @State private var hoveredGroup: String?
+
+    init(store: PromptWorkspaceStore) {
+        self.store = store
+        inputRouter = store.inputRouter
+    }
 
     private var groups: [(String, [PromptSession])] {
         var result: [(String, [PromptSession])] = []
@@ -230,7 +200,7 @@ private struct PromptSessionSidebar: View {
                 LazyVStack(alignment: .leading, spacing: 5) {
                     if store.sidebarLayout == .flat {
                         ForEach(Array(store.orderedSessions.enumerated()), id: \.element.id) { index, session in
-                            sessionRow(session, shortcut: commandKey.isPressed && index < 9 ? index + 1 : nil, grouped: false)
+                            sessionRow(session, shortcut: inputRouter.isCommandKeyPressed && index < 9 ? index + 1 : nil, grouped: false)
                                 .draggable(PromptSessionDragPayload(id: session.id))
                                 .modifier(PromptSessionDropTarget(store: store, target: session.id, folder: store.folder(for: session)))
                         }
@@ -256,7 +226,7 @@ private struct PromptSessionSidebar: View {
                                     VStack(spacing: 2) {
                                         ForEach(sessions) { session in
                                             let index = visibleSessions.firstIndex(where: { $0.id == session.id })
-                                            sessionRow(session, shortcut: commandKey.isPressed ? index.flatMap { $0 < 9 ? $0 + 1 : nil } : nil, grouped: true)
+                                            sessionRow(session, shortcut: inputRouter.isCommandKeyPressed ? index.flatMap { $0 < 9 ? $0 + 1 : nil } : nil, grouped: true)
                                                 .draggable(PromptSessionDragPayload(id: session.id))
                                                 .modifier(PromptSessionDropTarget(store: store, target: session.id, folder: store.sidebarFolders.contains(name) ? name : nil))
                                                 .onHover { hovering in
@@ -702,21 +672,6 @@ private struct CodexMark: View {
         .foregroundStyle(.white)
         .accessibilityLabel("Codex")
     }
-}
-
-@MainActor
-private final class PromptCommandKeyMonitor: ObservableObject {
-    @Published var isPressed = false
-    private var monitor: Any?
-
-    init() {
-        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp]) { [weak self] event in
-            self?.isPressed = event.modifierFlags.contains(.command)
-            return event
-        }
-    }
-
-    deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 }
 
 struct PromptSessionDragPayload: Codable, Transferable {

@@ -1,6 +1,18 @@
 import AppKit
 import GhosttyKit
 
+@MainActor
+@objc(PromptApplication)
+final class PromptApplication: NSApplication {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown,
+           mainMenu?.performKeyEquivalent(with: event) == true {
+            return
+        }
+        super.sendEvent(event)
+    }
+}
+
 @main
 enum PromptMain {
     static func main() {
@@ -9,7 +21,7 @@ enum PromptMain {
         }
         guard ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS else { exit(1) }
         PromptTerminalIntegration.install()
-        let application = NSApplication.shared
+        let application = PromptApplication.shared
         let delegate = PromptApplicationDelegate()
         application.delegate = delegate
         application.setActivationPolicy(.regular)

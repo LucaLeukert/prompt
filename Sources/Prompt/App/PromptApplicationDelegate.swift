@@ -11,7 +11,6 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     lazy var workspaceStore = PromptWorkspaceStore(runtime: runtime)
     private var windowController: PromptWindowController?
     private var tickTimer: Timer?
-    private var shortcutMonitor: Any?
     private var workspaceObservation: AnyCancellable?
     private var explicitQuitRequested = false
     private var isPersistingRestorationState = false
@@ -24,7 +23,6 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
             self?.persistRestorationState()
         }
         PromptController.shared.install()
-        installShortcutRouter()
         tickTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.runtime.application.tick() }
         }
@@ -48,7 +46,6 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         persistRestorationState()
         tickTimer?.invalidate()
-        if let shortcutMonitor { NSEvent.removeMonitor(shortcutMonitor) }
     }
 
     @objc func newWindow(_ sender: Any?) {
@@ -86,39 +83,18 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
     @objc func showCommandPalette(_ sender: Any?) {
         windowController?.isCommandPalettePresented.toggle()
     }
+    @objc func showCommandActions(_ sender: Any?) {
+        _ = workspaceStore.inputRouter.dispatch(.actions)
+    }
     @objc func showAIComposer(_ sender: Any?) { PromptController.shared.toggle() }
+    @objc func focusSessionFromMenu(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem else { return }
+        workspaceStore.focusSidebarSession(at: item.tag)
+    }
 
     @objc func quitApplication(_ sender: Any?) {
         explicitQuitRequested = true
         NSApp.terminate(sender)
-    }
-
-    private func installShortcutRouter() {
-        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard let self, event.modifierFlags.contains(.command) else { return event }
-                let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-                let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-
-                if modifiers == [.command], let number = Int(key), (1 ... 9).contains(number) {
-                    self.workspaceStore.focusSidebarSession(at: number - 1)
-                    return nil
-                }
-                switch (key, modifiers) {
-                case ("q", [.command]): self.quitApplication(nil)
-                case ("t", [.command]): self.newLocalSession(nil)
-                case ("w", [.command]): self.closePane(nil)
-                case ("o", [.command]): self.chooseLocalFolder(nil)
-                case ("p", [.command]): self.showCommandPalette(nil)
-                case ("d", [.command]): self.splitRight(nil)
-                case ("d", [.command, .shift]): self.splitDown(nil)
-                case ("i", [.command]): self.showAIComposer(nil)
-                case (" ", [.command, .shift]): self.showAIComposer(nil)
-                default: return event
-                }
-                return nil
-            }
-        }
     }
 
     private var focusedDirectory: String? {
@@ -192,9 +168,27 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
 
     private func installMainMenu() {
         let main = NSMenu()
+
         let appRoot = NSMenuItem()
         let app = NSMenu(title: "Prompt")
         app.addItem(withTitle: "About Prompt", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(.separator())
+        let services = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        services.submenu = NSMenu(title: "Services")
+        app.addItem(services)
+        NSApp.servicesMenu = services.submenu
+        app.addItem(.separator())
+        app.addItem(systemItem("Hide Prompt", #selector(NSApplication.hide(_:)), "h", [.command]))
+        app.addItem(systemItem(
+            "Hide Others",
+            #selector(NSApplication.hideOtherApplications(_:)),
+            "h",
+            [.command, .option]))
+        app.addItem(systemItem(
+            "Show All",
+            #selector(NSApplication.unhideAllApplications(_:)),
+            "",
+            []))
         app.addItem(.separator())
         let quit = app.addItem(withTitle: "Quit Prompt", action: #selector(quitApplication(_:)), keyEquivalent: "q")
         quit.target = self
@@ -203,26 +197,85 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
 
         let fileRoot = NSMenuItem()
         let file = NSMenu(title: "File")
+        file.addItem(item("New Window", #selector(newWindow(_:)), "n", [.command, .shift]))
         file.addItem(item("New Session", #selector(newLocalSession(_:)), "t", [.command]))
         file.addItem(item("Open Folder…", #selector(chooseLocalFolder(_:)), "o", [.command]))
+        file.addItem(.separator())
         file.addItem(item("Close Pane", #selector(closePane(_:)), "w", [.command]))
         fileRoot.submenu = file
         main.addItem(fileRoot)
 
+        let editRoot = NSMenuItem()
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(systemItem("Undo", Selector(("undo:")), "z", [.command]))
+        edit.addItem(systemItem("Redo", Selector(("redo:")), "z", [.command, .shift]))
+        edit.addItem(.separator())
+        edit.addItem(systemItem("Cut", #selector(NSText.cut(_:)), "x", [.command]))
+        edit.addItem(systemItem("Copy", #selector(NSText.copy(_:)), "c", [.command]))
+        edit.addItem(systemItem("Paste", #selector(NSText.paste(_:)), "v", [.command]))
+        edit.addItem(systemItem("Select All", #selector(NSText.selectAll(_:)), "a", [.command]))
+        editRoot.submenu = edit
+        main.addItem(editRoot)
+
         let viewRoot = NSMenuItem()
         let view = NSMenu(title: "View")
         view.addItem(item("Command Palette", #selector(showCommandPalette(_:)), "p", [.command]))
+        view.addItem(item("Actions", #selector(showCommandActions(_:)), "k", [.command]))
         view.addItem(item("AI Composer", #selector(showAIComposer(_:)), "i", [.command]))
+        view.addItem(.separator())
         view.addItem(item("Split Right", #selector(splitRight(_:)), "d", [.command]))
         view.addItem(item("Split Down", #selector(splitDown(_:)), "d", [.command, .shift]))
         viewRoot.submenu = view
         main.addItem(viewRoot)
+
+        let sessionRoot = NSMenuItem()
+        let session = NSMenu(title: "Session")
+        for index in 0 ..< 9 {
+            let value = item(
+                "Select Session \(index + 1)",
+                #selector(focusSessionFromMenu(_:)),
+                String(index + 1),
+                [.command])
+            value.tag = index
+            session.addItem(value)
+        }
+        sessionRoot.submenu = session
+        main.addItem(sessionRoot)
+
+        let windowRoot = NSMenuItem()
+        let window = NSMenu(title: "Window")
+        window.addItem(systemItem(
+            "Minimize",
+            #selector(NSWindow.performMiniaturize(_:)),
+            "m",
+            [.command]))
+        window.addItem(systemItem("Zoom", #selector(NSWindow.performZoom(_:)), "", []))
+        window.addItem(.separator())
+        window.addItem(systemItem(
+            "Bring All to Front",
+            #selector(NSApplication.arrangeInFront(_:)),
+            "",
+            []))
+        windowRoot.submenu = window
+        main.addItem(windowRoot)
+
         NSApp.mainMenu = main
     }
 
     private func item(_ title: String, _ action: Selector, _ key: String, _ modifiers: NSEvent.ModifierFlags) -> NSMenuItem {
         let value = NSMenuItem(title: title, action: action, keyEquivalent: key)
         value.target = self
+        value.keyEquivalentModifierMask = modifiers
+        return value
+    }
+
+    private func systemItem(
+        _ title: String,
+        _ action: Selector,
+        _ key: String,
+        _ modifiers: NSEvent.ModifierFlags
+    ) -> NSMenuItem {
+        let value = NSMenuItem(title: title, action: action, keyEquivalent: key)
         value.keyEquivalentModifierMask = modifiers
         return value
     }

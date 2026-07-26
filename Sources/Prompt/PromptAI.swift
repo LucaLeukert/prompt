@@ -3465,41 +3465,35 @@ enum PromptNativeInputRouter {
 
 @MainActor
 private final class PromptModeTabMonitor: ObservableObject {
-    private var token: Any?
+    private let inputOwner = UUID()
     private var dismissWork: DispatchWorkItem?
 
     func start(for surfaceView: PromptTerminalSurface) {
-        if token != nil {
-            scheduleDismiss(for: surfaceView)
-            return
-        }
         stop()
         scheduleDismiss(for: surfaceView)
-        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak surfaceView] event in
-            guard let surfaceView else { return event }
+        inputRouter?.claimSessionInterceptor(owner: inputOwner) { [weak surfaceView] event in
+            guard event.type == .keyDown, let surfaceView else { return false }
             if event.keyCode == 0x35,
                event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty {
                 NotificationCenter.default.post(name: .promptDismissModePicker, object: surfaceView)
-                return nil
+                return true
             }
             guard event.keyCode == 0x30,
                   event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else {
-                return event
+                return false
             }
 
-            return MainActor.assumeIsolated {
-                switch PromptNativeInputRouter.tabDisposition(on: surfaceView) {
-                case .passToTerminal:
-                    return event
-                case .consume:
-                    return nil
-                case .acceptAutocomplete:
-                    _ = PromptAutocompleteModel.shared.accept(on: surfaceView)
-                    return nil
-                case .switchMode(let mode):
-                    PromptNativeInputRouter.selectSurfaceModeFromKeyboard(mode, for: surfaceView)
-                    return nil
-                }
+            switch PromptNativeInputRouter.tabDisposition(on: surfaceView) {
+            case .passToTerminal:
+                return false
+            case .consume:
+                return true
+            case .acceptAutocomplete:
+                _ = PromptAutocompleteModel.shared.accept(on: surfaceView)
+                return true
+            case .switchMode(let mode):
+                PromptNativeInputRouter.selectSurfaceModeFromKeyboard(mode, for: surfaceView)
+                return true
             }
         }
     }
@@ -3507,9 +3501,11 @@ private final class PromptModeTabMonitor: ObservableObject {
     func stop() {
         dismissWork?.cancel()
         dismissWork = nil
-        guard let token else { return }
-        NSEvent.removeMonitor(token)
-        self.token = nil
+        inputRouter?.releaseSessionInterceptor(owner: inputOwner)
+    }
+
+    private var inputRouter: PromptInputRouter? {
+        (NSApp.delegate as? PromptApplicationDelegate)?.workspaceStore.inputRouter
     }
 
     private func scheduleDismiss(for surfaceView: PromptTerminalSurface) {
@@ -3522,9 +3518,6 @@ private final class PromptModeTabMonitor: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
-    deinit {
-        if let token { NSEvent.removeMonitor(token) }
-    }
 }
 
 private struct PromptSelectorGlassContainer: ViewModifier {
@@ -3836,6 +3829,7 @@ struct PromptNativeModeBadge: View {
             selectedSurfaceMode = PromptNativeInputRouter.surfaceMode(for: surfaceView)
             refresh()
         }
+        .onDisappear { tabMonitor.stop() }
         .onReceive(timer) { _ in refresh() }
         .onChange(of: showsModePicker) { visible in
             if !visible { DispatchQueue.main.async { surfaceView.focus() } }

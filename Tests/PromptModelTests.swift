@@ -22,21 +22,24 @@ final class PromptModelTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminalFocusRoutingPreservesEditableTextControls() {
-        let textView = NSTextView()
-        textView.isEditable = true
-        XCTAssertTrue(PromptKeyboardFocusRouting.preservesEditableControl(textView))
-        textView.isEditable = false
-        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(textView))
+    func testInputRouterUsesFocusedControlOrActiveSessionWithoutAnOverlay() throws {
+        let router = PromptInputRouter()
+        let letter = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "a",
+            charactersIgnoringModifiers: "a",
+            isARepeat: false,
+            keyCode: 0))
 
-        let textField = NSTextField()
-        textField.isEditable = true
-        textField.isEnabled = true
-        XCTAssertTrue(PromptKeyboardFocusRouting.preservesEditableControl(textField))
-        textField.isEnabled = false
-        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(textField))
-
-        XCTAssertFalse(PromptKeyboardFocusRouting.preservesEditableControl(NSButton()))
+        XCTAssertEqual(router.route(letter, editableControlIsFocused: true), .focusedControl)
+        XCTAssertEqual(router.route(letter, editableControlIsFocused: false), .activeSession)
+        router.isOverlayPresented = true
+        XCTAssertEqual(router.route(letter, editableControlIsFocused: false), .consume)
     }
 
     func testPaletteSubmitGateSuppressesRedispatchedReturn() {
@@ -74,32 +77,35 @@ final class PromptModelTests: XCTestCase {
     }
 
     @MainActor
-    func testPaletteKeyboardRouterHasExactlyOneActiveOwner() {
-        let router = PromptPaletteKeyboardRouter()
+    func testInputRouterRestoresPreviousOwnerWhenTopOwnerReleases() {
+        let router = PromptInputRouter()
         let root = UUID()
-        let submenu = UUID()
-        var rootCommands: [PromptPaletteKeyboardRouter.Command] = []
-        var submenuCommands: [PromptPaletteKeyboardRouter.Command] = []
+        let actions = UUID()
+        var rootCommands: [PromptInputRouter.Command] = []
+        var actionCommands: [PromptInputRouter.Command] = []
 
         router.claim(owner: root) { rootCommands.append($0); return true }
         XCTAssertTrue(router.dispatch(.moveDown))
 
-        router.claim(owner: submenu) { submenuCommands.append($0); return true }
-        router.release(owner: root)
+        router.claim(owner: actions) { actionCommands.append($0); return true }
         XCTAssertTrue(router.dispatch(.back))
 
-        router.release(owner: submenu)
-        XCTAssertFalse(router.dispatch(.submit))
-        XCTAssertEqual(rootCommands.count, 1)
-        XCTAssertEqual(submenuCommands.count, 1)
+        router.release(owner: actions)
+        XCTAssertTrue(router.dispatch(.submit))
+        XCTAssertEqual(rootCommands.count, 2)
+        XCTAssertEqual(actionCommands.count, 1)
+        XCTAssertEqual(router.ownerCount, 1)
     }
 
     @MainActor
-    func testPaletteRouterConsumesNavigationBeforeTerminalDispatch() throws {
-        let router = PromptPaletteKeyboardRouter()
+    func testInputRouterConsumesOwnedNavigationAndCommandModifiedInput() throws {
+        let router = PromptInputRouter()
         let owner = UUID()
-        var commands: [PromptPaletteKeyboardRouter.Command] = []
-        router.claim(owner: owner) { commands.append($0); return true }
+        var commands: [PromptInputRouter.Command] = []
+        router.claim(owner: owner, acceptsTextInput: true) {
+            commands.append($0)
+            return true
+        }
 
         let down = try XCTUnwrap(NSEvent.keyEvent(
             with: .keyDown,
@@ -123,10 +129,73 @@ final class PromptModelTests: XCTestCase {
             charactersIgnoringModifiers: "\r",
             isARepeat: false,
             keyCode: 36))
+        let commandP = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [.command],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "p",
+            charactersIgnoringModifiers: "p",
+            isARepeat: false,
+            keyCode: 35))
 
-        XCTAssertTrue(router.handle(down))
-        XCTAssertTrue(router.handle(enter))
-        XCTAssertEqual(commands.count, 2)
+        XCTAssertEqual(router.route(down, editableControlIsFocused: false), .consume)
+        XCTAssertEqual(router.route(enter, editableControlIsFocused: false), .consume)
+        XCTAssertEqual(router.route(commandP, editableControlIsFocused: true), .consume)
+        XCTAssertEqual(commands.count, 3)
+    }
+
+    @MainActor
+    func testInputRouterRunsSessionInterceptorsOnlyForActiveSessionInput() throws {
+        let router = PromptInputRouter()
+        var intercepted = 0
+        let interceptor = UUID()
+        router.claimSessionInterceptor(owner: interceptor) { _ in
+            intercepted += 1
+            return true
+        }
+        let tab = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\t",
+            charactersIgnoringModifiers: "\t",
+            isARepeat: false,
+            keyCode: 48))
+
+        XCTAssertEqual(router.route(tab, editableControlIsFocused: true), .focusedControl)
+        XCTAssertEqual(intercepted, 0)
+        XCTAssertEqual(router.route(tab, editableControlIsFocused: false), .consume)
+        XCTAssertEqual(intercepted, 1)
+    }
+
+    @MainActor
+    func testInputRouterReturnsDeclinedBackspaceToOwnedTextField() throws {
+        let router = PromptInputRouter()
+        let owner = UUID()
+        router.claim(owner: owner, acceptsTextInput: true) { command in
+            command != .delete
+        }
+        let backspace = try XCTUnwrap(NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "\u{7f}",
+            charactersIgnoringModifiers: "\u{7f}",
+            isARepeat: false,
+            keyCode: 51))
+
+        XCTAssertEqual(
+            router.route(backspace, editableControlIsFocused: true),
+            .focusedControl)
     }
 
     func testPalettePointerOnlyOverridesKeyboardSelectionAfterPhysicalMovement() {

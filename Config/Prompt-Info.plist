@@ -57,6 +57,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSPrincipalClass</key>
+	<string>PromptApplication</string>
 	<key>OSAScriptingDefinition</key>
 	<string>Ghostty.sdef</string>
 	<key>SUEnableAutomaticChecks</key>

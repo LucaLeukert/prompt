@@ -6,8 +6,10 @@ final class PromptWorkspaceStore: ObservableObject {
     enum SidebarSort: String, CaseIterable { case manual, recent, name }
 
     @Published var workspace: PromptWorkspace
-    @Published var isCommandPalettePresented = false
-    weak var commandPaletteKeyRouter: PromptPaletteKeyboardRouter?
+    let inputRouter = PromptInputRouter()
+    @Published var isCommandPalettePresented = false {
+        didSet { inputRouter.isOverlayPresented = isCommandPalettePresented }
+    }
     @Published var sidebarLayout: SidebarLayout {
         didSet { settings.set(sidebarLayout.rawValue, forKey: "PromptSidebarLayout") }
     }
