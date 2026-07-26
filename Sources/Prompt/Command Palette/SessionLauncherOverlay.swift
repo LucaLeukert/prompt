@@ -167,6 +167,8 @@ struct PromptRemoteSession: Codable, Hashable {
     private static let gitLocationsCacheFileName = "git-locations.json"
     private static let gitLocationsCacheLimit = 40
     private static var tailnetCache: (date: Date, hosts: [String])?
+    private static var remoteDirectoryCache: [String: [PromptFolderPickerEntry]] = [:]
+    private static var remoteDirectoryPrefetches: Set<String> = []
 
     static func currentDirectoryActions(store: PromptWorkspaceStore, directory: String) -> [PromptCommandAction] {
         CurrentDirectoryAction.allCases.map { variant in
@@ -508,7 +510,11 @@ struct PromptRemoteSession: Codable, Hashable {
 
     static func refreshTailnetDiscovery() {
         tailnetCache = nil
-        _ = discoverTailnetSSHHosts()
+        let hosts = Set(
+            savedRemoteSessions.map(\.destination)
+                + sshConfigHosts
+                + discoverTailnetSSHHosts())
+        prefetchRemoteHomeDirectories(Array(hosts))
     }
 
     static func localFolderPicker(store: PromptWorkspaceStore, at path: String) -> PromptFolderPickerConfiguration {
@@ -536,8 +542,11 @@ struct PromptRemoteSession: Codable, Hashable {
             let title = destination.split(separator: ".").first.map(String.init) ?? destination
             return (title: title, destination: destination, isTailnet: true)
         }
-        let hosts = configured + discovered
-        return hosts.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }.flatMap { host in
+        let hosts = (configured + discovered).sorted {
+            $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+        prefetchRemoteHomeDirectories(hosts.map(\.destination))
+        return hosts.flatMap { host in
             [
                 PromptCommandOption(title: host.title, section: host.isTailnet ? "Tailnet SSH hosts" : "SSH hosts", subtitle: host.isTailnet ? "Discovered through Tailscale · \(host.destination)" : "Native panes and inline AI", description: "Open a controlled tmux session on \(host.destination)", leadingIcon: host.isTailnet ? "point.3.connected.trianglepath.dotted" : "network", folderPicker: remoteFolderPicker(store: store, host: host.destination, transport: .controlMode), primaryActionTitle: "Choose folder on \(host.title)"),
                 PromptCommandOption(title: "\(host.title) · Legacy TTY", section: host.isTailnet ? "Tailnet SSH compatibility" : "SSH compatibility", subtitle: "Standard attached tmux client", description: "Use when tmux control mode is unavailable", leadingIcon: "network.slash", folderPicker: remoteFolderPicker(store: store, host: host.destination, transport: .legacyTTY), primaryActionTitle: "Choose legacy TTY folder on \(host.title)"),
@@ -724,7 +733,11 @@ struct PromptRemoteSession: Codable, Hashable {
         PromptFolderPickerConfiguration(
             initialDirectory: "~",
             displayName: { $0.promptDisplayPath },
-            directories: { try await remoteDirectories(host: host, at: $0) },
+            directories: { directory in
+                let entries = try await remoteDirectories(host: host, at: directory)
+                cacheRemoteDirectories(entries, host: host, at: directory)
+                return entries
+            },
             onSelect: { directory in
                 // Each Prompt session owns a UUID-backed tmux identity. The
                 // UUID is persisted in its remote configuration for restores.
@@ -742,7 +755,49 @@ struct PromptRemoteSession: Codable, Hashable {
                     transport: transport)
                 store.createRemote(config, title: "SSH · \(descriptor.name)")
             },
-            onReveal: nil)
+            onReveal: nil,
+            cachedDirectories: { cachedRemoteDirectories(host: host, at: $0) },
+            resolvePath: { PromptRemoteFolderPath.resolve($0) },
+            browsingDirectory: { PromptRemoteFolderPath.resolve($0) },
+            prepareDirectory: { try await createRemoteDirectory(host: host, at: $0) },
+            errorMessage: { _ in
+                "Couldn’t access this folder. Check the path and your connection, then try again."
+            })
+    }
+
+    private static func remoteDirectoryCacheKey(host: String, directory: String) -> String {
+        host + "\u{0}" + (PromptRemoteFolderPath.resolve(directory) ?? directory)
+    }
+
+    private static func cachedRemoteDirectories(
+        host: String,
+        at directory: String
+    ) -> [PromptFolderPickerEntry]? {
+        remoteDirectoryCache[remoteDirectoryCacheKey(host: host, directory: directory)]
+    }
+
+    private static func cacheRemoteDirectories(
+        _ entries: [PromptFolderPickerEntry],
+        host: String,
+        at directory: String
+    ) {
+        remoteDirectoryCache[remoteDirectoryCacheKey(host: host, directory: directory)] = entries
+    }
+
+    private static func prefetchRemoteHomeDirectories(_ hosts: [String]) {
+        for host in hosts {
+            let key = remoteDirectoryCacheKey(host: host, directory: "~")
+            guard remoteDirectoryCache[key] == nil,
+                  remoteDirectoryPrefetches.insert(key).inserted else { continue }
+            Task {
+                defer { remoteDirectoryPrefetches.remove(key) }
+                guard let entries = try? await remoteDirectories(host: host, at: "~") else { return }
+                // Prefetching only warms the cache. It deliberately does not
+                // publish into a picker that may already be showing another
+                // directory or a user-controlled selection.
+                remoteDirectoryCache[key] = entries
+            }
+        }
     }
 
     private static func remember(_ descriptor: PromptRemoteSession) {
@@ -785,6 +840,40 @@ struct PromptRemoteSession: Codable, Hashable {
                 let name = String(relative.dropFirst(2))
                 return PromptFolderPickerEntry(name: name, path: (base as NSString).appendingPathComponent(name))
             }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }.value
+    }
+
+    private static func createRemoteDirectory(host: String, at directory: String) async throws {
+        let resolved = PromptRemoteFolderPath.resolve(directory) ?? directory
+        let requested: String
+        if resolved == "~" { requested = "$HOME" }
+        else if resolved.hasPrefix("~/") { requested = "$HOME/" + shellQuote(String(resolved.dropFirst(2))) }
+        else { requested = shellQuote(resolved) }
+        let script = "target=\(requested); mkdir -p -- \"$target\" && cd -- \"$target\""
+        let quotedScript = shellQuote(script)
+        try await Task.detached {
+            let process = Process()
+            let errors = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            process.arguments = [
+                "-o", "ConnectTimeout=8", "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                host, "sh", "-lc", quotedScript,
+            ]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = errors
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                let message = String(
+                    data: errors.fileHandleForReading.readDataToEndOfFile(),
+                    encoding: .utf8
+                ) ?? "Could not create this remote folder."
+                throw NSError(
+                    domain: "PromptRemoteFolderPicker",
+                    code: Int(process.terminationStatus),
+                    userInfo: [NSLocalizedDescriptionKey: message])
+            }
         }.value
     }
 

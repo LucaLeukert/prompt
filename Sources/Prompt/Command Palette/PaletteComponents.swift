@@ -44,6 +44,28 @@ private extension View {
             self.buttonStyle(.plain)
         }
     }
+
+    func promptPaletteFooterAction(active: Bool = false) -> some View {
+        modifier(PromptPaletteFooterActionModifier(active: active))
+    }
+}
+
+private struct PromptPaletteFooterActionModifier: ViewModifier {
+    let active: Bool
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(.plain)
+            .padding(.horizontal, 9)
+            .frame(height: 38)
+            .background(
+                Color.primary.opacity(active || isHovered ? 0.075 : 0),
+                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .onHover { isHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: active || isHovered)
+    }
 }
 
 struct PromptCommandAction: Identifiable {
@@ -260,6 +282,11 @@ struct PromptPaletteNavigation {
     }
 }
 
+struct PromptPaletteReturnState: Equatable {
+    let rawQuery: String
+    let selectedIndex: UInt?
+}
+
 @MainActor
 final class PromptPaletteKeyboardRouter: ObservableObject {
     enum Command {
@@ -331,6 +358,8 @@ struct PromptCommandPaletteContentView: View {
     @State private var rawQuery = ""
     @State private var selectedIndex: UInt? = 0
     @State private var navigation = PromptPaletteNavigation()
+    @State private var returnStates: [PromptPaletteReturnState] = []
+    @State private var isRestoringReturnState = false
     @State private var actionsArePresented = false
     @State private var submitGate = PromptPaletteSubmitGate()
     @State private var pointerLocationAtKeyboardNavigation: CGPoint?
@@ -416,6 +445,7 @@ struct PromptCommandPaletteContentView: View {
                             canGoBack: !navigation.isAtRoot,
                             onBack: goBack)
                             .onChange(of: query) { _ in
+                                guard !isRestoringReturnState else { return }
                                 // Always keep an actionable row selected so Return works immediately.
                                 selectedIndex = filteredOptions.isEmpty ? nil : 0
                             }
@@ -443,9 +473,6 @@ struct PromptCommandPaletteContentView: View {
 
                         HStack(spacing: 16) {
                             PaletteHint(keys: ["↑", "↓"], label: "Navigate")
-                            if navigation.isAtRoot {
-                                PaletteHint(keys: ["↩"], label: "Select")
-                            }
                             Spacer()
                             if let selectedOption {
                                 Button {
@@ -461,7 +488,7 @@ struct PromptCommandPaletteContentView: View {
                                             keys: ["↩"])
                                     }
                                 }
-                                .promptGlassButtonStyle()
+                                .promptPaletteFooterAction()
 
                                 if !navigation.isAtRoot {
                                     Divider()
@@ -476,7 +503,7 @@ struct PromptCommandPaletteContentView: View {
                                         PaletteLabelFirstHint(label: "Actions", keys: ["⌘", "K"])
                                     }
                                 }
-                                .promptGlassButtonStyle()
+                                .promptPaletteFooterAction(active: actionsArePresented)
                             }
                         }
                         .font(.system(size: 11, weight: .medium))
@@ -534,14 +561,14 @@ struct PromptCommandPaletteContentView: View {
         actionsArePresented = false
         switch option.behavior {
         case .folder(let picker):
-            navigation.push(.folder(picker))
+            push(.folder(picker))
         case .git(let picker):
-            navigation.push(.git(picker))
+            push(.git(picker))
         case .sidebar(let editor):
-            navigation.push(.sidebar(editor))
+            push(.sidebar(editor))
         case .submenu(let children):
             let childOptions = children()
-            navigation.push(.commands(title: option.title, options: childOptions))
+            push(.commands(title: option.title, options: childOptions))
             rawQuery = ""
             selectedIndex = 0
         case .perform(let action):
@@ -613,6 +640,8 @@ struct PromptCommandPaletteContentView: View {
         rawQuery = ""
         selectedIndex = 0
         navigation.reset()
+        returnStates.removeAll()
+        isRestoringReturnState = false
         actionsArePresented = false
         submitGate.reset()
     }
@@ -631,9 +660,22 @@ struct PromptCommandPaletteContentView: View {
 
     private func goBack() {
         guard navigation.pop() else { isPresented = false; return }
-        rawQuery = ""
-        selectedIndex = 0
+        let returnState = returnStates.popLast()
+        isRestoringReturnState = true
+        rawQuery = returnState?.rawQuery ?? ""
+        selectedIndex = returnState?.selectedIndex
+        pointerLocationAtKeyboardNavigation = NSEvent.mouseLocation
+        DispatchQueue.main.async {
+            isRestoringReturnState = false
+        }
         DispatchQueue.main.async { claimCommandKeyboard() }
+    }
+
+    private func push(_ route: PromptPaletteRoute) {
+        returnStates.append(PromptPaletteReturnState(
+            rawQuery: rawQuery,
+            selectedIndex: selectedIndex))
+        navigation.push(route)
     }
 
     /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
@@ -699,14 +741,14 @@ private struct PromptSidebarVisualEditor: View {
         ZStack(alignment: .bottomTrailing) {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
-                    Button(action: onBack) { Image(systemName: "chevron.left").frame(width: 28, height: 28) }.promptGlassButtonStyle()
+                    PaletteHeaderLeading(canGoBack: true, onBack: onBack)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Edit sidebar").font(.system(size: 17, weight: .semibold))
                         Text("Drag sessions into groups or reorder them").font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     Button { createFolder() } label: { Label("Folder", systemImage: "folder.badge.plus") }.promptGlassButtonStyle()
-                }.padding(.horizontal, 18).frame(height: 64)
+                }.padding(.horizontal, 18).frame(height: 62)
                 Divider().opacity(0.55)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
@@ -848,7 +890,12 @@ struct PromptFolderPickerConfiguration {
     let directories: (String) async throws -> [PromptFolderPickerEntry]
     let onSelect: (String) -> Void
     let onReveal: ((String) -> Void)?
+    var cachedDirectories: ((String) -> [PromptFolderPickerEntry]?)? = nil
+    var resolvePath: (String) -> String? = { PromptFolderPath.resolve($0) }
+    var browsingDirectory: (String) -> String? = { PromptFolderPath.existingDirectory($0) }
     var createDirectory: ((String) throws -> Void)? = nil
+    var prepareDirectory: ((String) async throws -> Void)? = nil
+    var errorMessage: (Error) -> String = { $0.localizedDescription }
     var sectionTitle = "Directories"
     var actionTitle = "Add"
     var emptyText = "No subdirectories"
@@ -909,6 +956,45 @@ enum PromptFolderPath {
             directory: parent,
             query: url.lastPathComponent,
             exists: false)
+    }
+}
+
+enum PromptRemoteFolderPath {
+    /// Normalizes a POSIX path without consulting the local filesystem or
+    /// expanding `~` to the local account's home directory.
+    static func resolve(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let prefix: String
+        let remainder: Substring
+        if trimmed == "~" || trimmed == "~/" {
+            return "~"
+        } else if trimmed.hasPrefix("~/") {
+            prefix = "~"
+            remainder = trimmed.dropFirst(2)
+        } else if trimmed.hasPrefix("/") {
+            prefix = "/"
+            remainder = trimmed.dropFirst()
+        } else {
+            return nil
+        }
+
+        var components: [Substring] = []
+        for component in remainder.split(separator: "/", omittingEmptySubsequences: true) {
+            switch component {
+            case ".":
+                continue
+            case "..":
+                if !components.isEmpty { components.removeLast() }
+            default:
+                components.append(component)
+            }
+        }
+        guard !components.isEmpty else { return prefix }
+        return prefix == "/"
+            ? "/" + components.joined(separator: "/")
+            : "~/" + components.joined(separator: "/")
     }
 }
 
@@ -1270,6 +1356,7 @@ private struct FolderPickerView: View {
         self.onBack = onBack
         _directory = State(initialValue: configuration.initialDirectory)
         _pathField = State(initialValue: configuration.displayName(configuration.initialDirectory))
+        _entries = State(initialValue: configuration.cachedDirectories?(configuration.initialDirectory) ?? [])
     }
 
     private var parentPath: String? {
@@ -1306,16 +1393,10 @@ private struct FolderPickerView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 12) {
-                Button(action: leavePicker) {
-                    Image(systemName: "arrow.left")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(width: 24, height: 28)
-                }
-                .promptGlassButtonStyle()
-                .help("Back")
+                PaletteHeaderLeading(canGoBack: true, onBack: leavePicker)
 
                 TextField("Folder path", text: $pathField)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 17, weight: .regular))
                     .textFieldStyle(.plain)
                     .focused($pathFocused)
                     .onChange(of: pathField) { value in
@@ -1325,7 +1406,7 @@ private struct FolderPickerView: View {
                         let followsNavigation = value == configuration.displayName(directory)
                         if !followsNavigation { prefersParentSelection = false }
                         let nextDirectory = configuration.createDirectory == nil
-                            ? PromptFolderPath.existingDirectory(value)
+                            ? configuration.browsingDirectory(value)
                             : PromptFolderPath.browsingContext(value)?.directory
                         guard let nextDirectory, nextDirectory != directory else {
                             updateDefaultSelection()
@@ -1465,7 +1546,7 @@ private struct FolderPickerView: View {
     }
 
     private func navigate(to value: String, preferringParent: Bool = false) {
-        guard let resolved = PromptFolderPath.resolve(value) else { return }
+        guard let resolved = configuration.resolvePath(value) else { return }
         prefersParentSelection = preferringParent
         directory = resolved
         pathField = configuration.displayName(resolved)
@@ -1511,8 +1592,8 @@ private struct FolderPickerView: View {
     }
 
     private func choose(_ value: String) {
-        guard let resolved = PromptFolderPath.resolve(value) else { return }
-        if PromptFolderPath.existingDirectory(resolved) == nil,
+        guard let resolved = configuration.resolvePath(value) else { return }
+        if configuration.browsingDirectory(resolved) == nil,
            let createDirectory = configuration.createDirectory {
             do {
                 try createDirectory(resolved)
@@ -1521,22 +1602,53 @@ private struct FolderPickerView: View {
                 return
             }
         }
-        isPresented = false
-        configuration.onSelect(resolved)
+        guard let prepareDirectory = configuration.prepareDirectory else {
+            finishChoosing(resolved)
+            return
+        }
+        Task {
+            do {
+                try await prepareDirectory(resolved)
+                guard !Task.isCancelled else { return }
+                finishChoosing(resolved)
+            } catch {
+                guard !Task.isCancelled else { return }
+                loadError = configuration.errorMessage(error)
+            }
+        }
     }
 
     private func chooseCurrentDirectory() {
         choose(pathField)
     }
 
+    private func finishChoosing(_ directory: String) {
+        isPresented = false
+        configuration.onSelect(directory)
+    }
+
     private func loadDirectory() async {
-        isLoading = true
+        let requestedDirectory = directory
+        if let cached = configuration.cachedDirectories?(requestedDirectory) {
+            entries = cached
+        }
+        isLoading = entries.isEmpty
         loadError = nil
         do {
-            entries = try await configuration.directories(directory)
+            let refreshed = try await configuration.directories(requestedDirectory)
+            guard PromptFolderPickerRefreshPolicy.shouldApply(
+                requestedDirectory: requestedDirectory,
+                currentDirectory: directory,
+                isCancelled: Task.isCancelled
+            ) else { return }
+            entries = refreshed
         } catch {
-            entries = []
-            loadError = error.localizedDescription
+            guard PromptFolderPickerRefreshPolicy.shouldApply(
+                requestedDirectory: requestedDirectory,
+                currentDirectory: directory,
+                isCancelled: Task.isCancelled
+            ) else { return }
+            loadError = configuration.errorMessage(error)
         }
         updateDefaultSelection()
         isLoading = false
@@ -1565,6 +1677,16 @@ enum PromptFolderPickerSelectionPolicy {
 enum PromptFolderPickerKeyboardPolicy {
     static func shouldNavigateToParent(isListNavigationActive: Bool) -> Bool {
         isListNavigationActive
+    }
+}
+
+enum PromptFolderPickerRefreshPolicy {
+    static func shouldApply(
+        requestedDirectory: String,
+        currentDirectory: String,
+        isCancelled: Bool
+    ) -> Bool {
+        !isCancelled && requestedDirectory == currentDirectory
     }
 }
 
@@ -1747,6 +1869,30 @@ private struct CommandActionsView: View {
     }
 }
 
+private struct PaletteHeaderLeading: View {
+    let canGoBack: Bool
+    let onBack: () -> Void
+
+    var body: some View {
+        Group {
+            if canGoBack {
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
+                .help("Back")
+            } else {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
+            }
+        }
+    }
+}
+
 /// The text field for building the query for the command palette.
 private struct CommandPaletteQuery: View {
     @Binding var query: String
@@ -1757,18 +1903,7 @@ private struct CommandPaletteQuery: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            if canGoBack {
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                }
-                .promptGlassButtonStyle()
-                .help("Back")
-            }
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(.secondary)
+            PaletteHeaderLeading(canGoBack: canGoBack, onBack: onBack)
             TextField(title.map { "Search \($0.lowercased())…" } ?? "Search sessions and commands…", text: $query)
                 .font(.system(size: 17, weight: .regular))
                 .textFieldStyle(.plain)
@@ -1916,7 +2051,7 @@ private struct CommandRow: View {
     private var fixedTrailingWidth: CGFloat {
         let symbolCount = option.symbols?.count ?? 0
         let symbolsWidth = symbolCount == 0 ? 0 : CGFloat(symbolCount * 13 + symbolCount - 1)
-        let showsChevron = option.opensRoute && isSelected
+        let showsChevron = isSelected
         return symbolsWidth + (symbolCount > 0 && showsChevron ? 10 : 0) + (showsChevron ? 8 : 0)
     }
 
@@ -1986,7 +2121,7 @@ private struct CommandRow: View {
                         ShortcutSymbolsView(symbols: symbols)
                             .foregroundStyle(.secondary)
                     }
-                    if option.opensRoute, isSelected {
+                    if isSelected {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.tertiary)

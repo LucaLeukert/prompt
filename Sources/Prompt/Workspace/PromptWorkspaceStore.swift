@@ -347,6 +347,12 @@ final class PromptWorkspaceStore: ObservableObject {
            let active = descriptors.first(where: \.active), let focused = paneByTmuxID[active.id] {
             updated.sessions[sessionIndex].focusedPaneID = focused.id
         }
+        // The remote monitor reports the complete tmux inventory on every
+        // poll. Publishing the same tree needlessly rebuilds the SwiftUI
+        // hierarchy around its mounted AppKit surfaces. In particular, doing
+        // that while the command palette overlay is entering the hierarchy can
+        // re-enter AttributeGraph and terminate the process.
+        guard updated.sessions[sessionIndex] != workspace.sessions[sessionIndex] else { return }
         workspace = updated
     }
 

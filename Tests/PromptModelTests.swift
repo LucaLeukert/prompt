@@ -66,6 +66,13 @@ final class PromptModelTests: XCTestCase {
         XCTAssertTrue(navigation.isAtRoot)
     }
 
+    func testPaletteReturnStateRetainsParentQueryAndSelection() {
+        let state = PromptPaletteReturnState(rawQuery: "git", selectedIndex: 2)
+
+        XCTAssertEqual(state.rawQuery, "git")
+        XCTAssertEqual(state.selectedIndex, 2)
+    }
+
     @MainActor
     func testPaletteKeyboardRouterHasExactlyOneActiveOwner() {
         let router = PromptPaletteKeyboardRouter()
@@ -148,6 +155,17 @@ final class PromptModelTests: XCTestCase {
         XCTAssertNil(PromptFolderPath.existingDirectory("/definitely/not/a/prompt/directory"))
     }
 
+    func testRemoteFolderPickerNeverExpandsPathsAgainstLocalHome() {
+        XCTAssertEqual(PromptRemoteFolderPath.resolve(" ~/ "), "~")
+        XCTAssertEqual(PromptRemoteFolderPath.resolve("~/src/../project"), "~/project")
+        XCTAssertEqual(PromptRemoteFolderPath.resolve("/srv/./app/../data"), "/srv/data")
+        XCTAssertEqual(PromptRemoteFolderPath.resolve("/../../srv"), "/srv")
+        XCTAssertNil(PromptRemoteFolderPath.resolve("relative/path"))
+        XCTAssertNotEqual(
+            PromptRemoteFolderPath.resolve("~/"),
+            FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path)
+    }
+
     func testFolderPickerUsesExistingParentForPartialDirectory() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("prompt-folder-context-\(UUID().uuidString)")
@@ -175,6 +193,21 @@ final class PromptModelTests: XCTestCase {
             isListNavigationActive: true))
         XCTAssertFalse(PromptFolderPickerKeyboardPolicy.shouldNavigateToParent(
             isListNavigationActive: false))
+    }
+
+    func testFolderPickerRefreshNeverReplacesAnotherVisibleDirectory() {
+        XCTAssertTrue(PromptFolderPickerRefreshPolicy.shouldApply(
+            requestedDirectory: "~/src",
+            currentDirectory: "~/src",
+            isCancelled: false))
+        XCTAssertFalse(PromptFolderPickerRefreshPolicy.shouldApply(
+            requestedDirectory: "~",
+            currentDirectory: "~/src",
+            isCancelled: false))
+        XCTAssertFalse(PromptFolderPickerRefreshPolicy.shouldApply(
+            requestedDirectory: "~/src",
+            currentDirectory: "~/src",
+            isCancelled: true))
     }
 
     func testFolderPickerDefaultsToFirstFolderUnlessNavigatingUp() {
@@ -589,6 +622,29 @@ final class PromptModelTests: XCTestCase {
         _ = store.workspaceForRestoration()
 
         XCTAssertEqual(changes, 0)
+        withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
+    func testRestorationSnapshotWithRemoteSessionDoesNotRepublishWorkspace() {
+        let store = PromptWorkspaceStore(runtime: Self.integrationRuntime)
+        let configuration = PromptRemoteSessionConfiguration(
+            destination: "example.invalid",
+            workingDirectory: "/srv/project",
+            persistentSessionName: "prompt-test",
+            attachOnly: true)
+        let session = PromptSession(
+            title: "Remote",
+            configuration: .remote(configuration),
+            rootPane: PromptPane())
+        store.workspace.append(session)
+        var changes = 0
+        let observation = store.objectWillChange.sink { changes += 1 }
+
+        let snapshot = store.workspaceForRestoration()
+
+        XCTAssertEqual(changes, 0)
+        XCTAssertEqual(snapshot.sessions.first?.configuration, .remote(configuration))
         withExtendedLifetime(observation) {}
     }
 
