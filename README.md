@@ -1,121 +1,153 @@
 # Prompt
 
-Prompt is a macOS-only terminal with ambient AI assistance. The real libghostty
-terminal owns the experience; Codex stays out of the way until it can help with
-visible terminal context, an error, a command, or the current project.
+Prompt is a native macOS terminal built around Ghostty with Codex integrated
+into the terminal workflow. It keeps the terminal as the primary interface:
+commands, output, and AI responses share the same workspace instead of splitting
+your attention between a terminal and a separate chat application.
 
-Every terminal surface has one bottom command bar. Use **Shell** mode to submit
-normal commands to the PTY and **AI** mode to ask Codex. AI questions and
-visually labeled responses are rendered into the real Ghostty grid, so they live
-beside ordinary command output in the same selectable, searchable scrollback.
-**Command-Shift-Space** focuses the bar in AI mode. Spark is the default model.
+> [!IMPORTANT]
+> Prompt is early-stage software. The `v0.1` codebase is intended for
+> developers, and its published build is an unsigned macOS application. Expect
+> breaking changes to behavior, configuration, and stored workspace state.
 
-## What works
+## Why Prompt?
 
-- Native Ghostty Metal terminal, PTY, keyboard, mouse, selection, IME, splits,
-  tabs, and shell integration.
-- Codex app-server lifecycle and JSONL protocol initialization.
-- Account, model, and rate-limit discovery (including Spark-capable models when
-  the account exposes them).
-- Project-root resolution using Codex `project_root_markers`, with `.git` and
-  `.jj` defaults.
-- Project-scoped thread listing, start, resume, read, fork, and archive.
-- Streaming assistant messages and activity/diff cards.
-- Terminal output attached as explicitly untrusted turn context.
-- Bottom-aligned Shell/AI command bar integrated into every terminal surface.
-- Sanitized, ANSI-styled AI blocks injected through libghostty's application
-  output bridge into native terminal history—never a separate chat window.
-- Approval cards for app-server command and file-change requests.
-- Fenced-command **Insert** and **Run** actions against the active libghostty
-  surface.
-- Silent post-command analysis that suppresses routine results and adds only a
-  compact set of AI-selected, SF Symbol-labeled actions when useful.
-- SSH sessions backed by headless tmux control mode: Prompt renders panes as
-  native splits, preserves inline AI cards locally, and reconnects without
-  letting tmux own or repaint the terminal UI. A legacy attached-TTY mode
-  remains available from the session launcher.
-- `codex resume <thread-id>` and `codex://threads/<thread-id>` handoffs.
+- **A real terminal first.** Rendering, PTY I/O, selection, accessibility,
+  keyboard and mouse input, IME, splits, and shell integration are provided by
+  Ghostty.
+- **AI where the work happens.** Ask Codex about the active terminal and project
+  from the command bar. Responses, approvals, diffs, and suggested commands stay
+  attached to the terminal session.
+- **Useful session workflows.** Open projects, worktrees, containers, remote
+  hosts, persistent tmux sessions, scratch directories, and privileged shells
+  from one command palette.
+- **Explicit control.** Suggested commands can be inserted for review or run
+  directly. Codex command and file-change requests remain subject to approval.
+- **Native macOS UI.** Prompt uses AppKit, SwiftUI, and Metal rather than a web
+  shell around a terminal process.
 
-The full product and technical plan is in [PLAN.md](PLAN.md).
+## Current capabilities
 
-## Build
+- Local terminal sessions, tabs, native split panes, workspace restoration, and
+  searchable/selectable terminal history.
+- A bottom command bar with Shell and AI routing.
+- Codex app-server startup, account and model discovery, project-scoped threads,
+  streaming responses, approval requests, and thread handoff to the Codex CLI
+  or desktop app.
+- Bounded terminal context supplied to Codex as untrusted evidence; project
+  files and Git state are inspected by Codex through its own tools.
+- Post-command analysis that stays silent unless it finds a concrete next
+  action.
+- SSH sessions using headless tmux control mode, with a legacy attached-TTY
+  transport available as a fallback.
+- Project, Git worktree, container, Compose service, scratch, task, and
+  privileged-session launchers.
+- Optional discovery of Tailscale SSH peers and GitHub Copilot-powered inline
+  shell completions when their local tools and credentials are available.
 
-Prompt keeps its own sources, resources, and tests in this repository. The
-pinned Ghostty source under `Vendor/ghostty` remains an unmodified submodule;
-the build creates an isolated worktree under `.build/ghostty` and applies two
-small, ordered integration patches there. Prompt sources are compiled directly
-from `Sources` and are never copied into Ghostty.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the project's technical
+boundaries.
 
-Start from a full clone with submodules:
+## Requirements
+
+To run Prompt:
+
+- macOS 13 Ventura or newer.
+- The [Codex CLI](https://github.com/openai/codex) installed and authenticated
+  for AI features.
+- `ssh` and `tmux` on the relevant hosts for persistent remote sessions.
+
+To build Prompt:
+
+- A full Xcode installation.
+- Git and Homebrew.
+- XcodeGen, SwiftFormat, SwiftLint, and actionlint. Install them with
+  `make lint-install`.
+- Zig 0.15. The build installs Homebrew's `zig@0.15` formula when necessary, or
+  you can pass an executable with `ZIG=/path/to/zig`.
+
+The Ghostty build normally produces its own runtime resources. If it does not,
+the current build fallback expects an installed copy of Ghostty at
+`/Applications/Ghostty.app`.
+
+## Build from source
+
+Clone the repository with its Ghostty submodule:
 
 ```sh
 git clone --recurse-submodules https://github.com/LucaLeukert/prompt.git
 cd prompt
-```
-
-From the repository root, the complete local development loop is:
-
-```sh
+make lint-install
 make run
 ```
 
-For native Xcode development, generate and open Prompt's project:
+`make run` builds and opens `Artifacts/Debug/Prompt.app`. The first build is
+substantial because Prompt compiles its pinned Ghostty revision.
 
-```sh
-make xcode
-```
-
-This prepares Ghostty, generates `Prompt.xcodeproj` from the checked-in
-`project.yml`, and opens the shared **Prompt** scheme. Run, Test, Profile,
-Analyze, and Archive are configured against Prompt's own application target.
-Xcode indexes the canonical files under `Sources`, so there are no disposable
-copies to edit accidentally.
-
-The root `Makefile` is the build-system entry point. It owns the isolated
-Ghostty integration worktree, native Ghostty framework build, Xcode project
-generation, app build, artifact validation, tests, and launching. The runnable
-bundle always lands at:
+Common development commands:
 
 ```text
-Artifacts/Debug/Prompt.app
+make build        Build the app without opening it
+make test         Run the unit test suite
+make lint         Check formatting, SwiftLint, Actions, project generation,
+                  patch application, and the pristine vendor checkout
+make format       Apply SwiftFormat to project sources and tests
+make patch-check  Apply all Prompt patches to the pinned Ghostty revision
+make xcode        Generate and open Prompt.xcodeproj
+make clean        Remove repository-local generated output
+make help         Print the complete command summary
 ```
 
-Other useful commands are:
+Use `CONFIGURATION=Release` for a local release build:
 
 ```sh
-make build  # build without launching
-make test   # run the Prompt test suite
-make format # apply Swift formatting
-make lint   # check Swift formatting/rules and GitHub Actions
-make clean  # remove repo-local generated build output
-make help   # show the command summary
+make build CONFIGURATION=Release
 ```
 
-Install the local build and lint tools once with `make lint-install`. Prompt
-uses XcodeGen, SwiftFormat, SwiftLint, and actionlint with checked-in repository
-configuration. CI runs the same `make lint` target used locally.
+Generated files stay under `Artifacts/`, `DerivedData/`, `.build/`, and
+`Prompt.xcodeproj`. Do not edit generated Ghostty sources in `.build/ghostty`;
+the source of truth is the pinned submodule plus the patches in
+`Patches/ghostty`.
 
-All generated development state stays under `Artifacts/`, `DerivedData/`, and
-`.build/`. The checked-out Ghostty submodule remains pristine after sync,
-builds, and tests. Prompt-owned fonts and icons are vendored under `Resources/`
-and Xcode copies them into the app; the finished bundle is checked for required
-resources before a build is reported successful.
+## Configuration and local data
 
-Set `CONFIGURATION=Release` to use the same targets for a local Release build.
-The project targets macOS and requires Xcode, XcodeGen, and Zig 0.15. The build
-installs the Homebrew Zig formula if it is unavailable.
+Prompt stores its settings, restored workspace state, caches, and rotating logs
+under `~/.prompt`. Codex authentication and configuration remain owned by the
+Codex CLI under `~/.codex`.
 
-## Git worktrees
+Terminal output may contain secrets. Prompt treats captured output as untrusted
+input, bounds the context it sends, and does not make terminal text equivalent
+to instructions. You should still review the active terminal content before
+asking an AI question.
 
-Prompt treats both a `.git` directory and Git's `.git` worktree file as a
-project-root marker, so terminal commands and Codex sessions stay scoped to
-the active worktree. Build and test from the worktree itself; the scripts
-initialize its Ghostty submodule, create a separate integration worktree under
-`.build`, apply the pinned Prompt patches, and build an XCFramework there. This
-keeps the submodule and all generated artifacts isolated between worktrees.
+## Contributing
 
-```sh
-git worktree add ../prompt-feature -b feature
-cd ../prompt-feature
-make test
-```
+Contributions are welcome. Keep changes focused, add tests for behavior changes,
+and run `make lint` and `make test` before opening a pull request. For substantial
+features or changes to the Ghostty patch stack, open an issue before investing
+in a large implementation.
+
+For bugs, include the Prompt version, macOS version, reproduction steps, and the
+smallest relevant excerpt from `~/.prompt/logs/prompt.log`. Remove tokens,
+commands, paths, hostnames, and terminal output that you do not intend to make
+public.
+
+## Project status and releases
+
+Release builds are currently unsigned and not notarized, so macOS will display a
+Gatekeeper warning. A signed and notarized distribution path is a
+release-readiness requirement, not a completed feature.
+
+## License and acknowledgements
+
+Prompt's original source code is available under the [MIT License](LICENSE).
+Third-party components and assets retain their own licenses.
+
+Prompt embeds a pinned revision of
+[Ghostty](https://github.com/ghostty-org/ghostty), also licensed under MIT.
+Geist font license information is included in
+`Resources/Prompt/Fonts/LICENSE.txt`. The OpenAI Blossom is used under OpenAI's
+brand guidelines and is not licensed under MIT; details are recorded in
+`Resources/Prompt/Fonts/TRADEMARKS.txt`. Codex, OpenAI, Ghostty, and other names
+and marks belong to their respective owners; this project is not an official
+OpenAI or Ghostty project.

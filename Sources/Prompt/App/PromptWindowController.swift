@@ -941,14 +941,13 @@ private final class PromptMouseTransparentView: NSView {
 private struct CodexMark: View {
     var body: some View {
         Group {
-            if let url = Bundle.main.url(forResource: "ChatGPTMark", withExtension: "svg", subdirectory: "Fonts"),
+            if let url = Bundle.main.url(forResource: "OpenAIBlossom", withExtension: "svg", subdirectory: "Fonts"),
                let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().renderingMode(.template).aspectRatio(contentMode: .fit)
+                Image(nsImage: image).resizable().renderingMode(.original).aspectRatio(contentMode: .fit)
             } else {
                 Image(systemName: "circle.hexagongrid.fill").resizable().aspectRatio(contentMode: .fit)
             }
         }
-        .foregroundStyle(.white)
         .accessibilityLabel("Codex")
     }
 }
