@@ -15,10 +15,16 @@ enum PromptLocalSessionLauncher {
         let isMainWorktree: Bool
     }
 
-    struct Container: Equatable {
+    struct Container: Equatable, Sendable {
         let id: String
         let name: String
         let state: String
+    }
+
+    struct ContainerCatalog: Sendable {
+        let containers: [Container]
+        let composeServices: [String]
+        let errorDescription: String?
     }
 
     enum LaunchError: LocalizedError {
@@ -194,6 +200,28 @@ enum PromptLocalSessionLauncher {
             let fields = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             guard fields.count == 3 else { return nil }
             return .init(id: fields[0], name: fields[1], state: fields[2])
+        }
+    }
+
+    static func containerCatalog(directory: String) -> ContainerCatalog {
+        do {
+            let containers = try containers()
+            let services = (try? composeServices(directory: directory)) ?? []
+            if containers.isEmpty && services.isEmpty {
+                throw LaunchError.failed("Docker is available, but no containers or Compose services were found.")
+            }
+            return ContainerCatalog(
+                containers: containers,
+                composeServices: services,
+                errorDescription: nil)
+        } catch {
+            PromptLog.sessions.notice(
+                "Container discovery unavailable",
+                metadata: ["error": "\(error.localizedDescription)"])
+            return ContainerCatalog(
+                containers: [],
+                composeServices: [],
+                errorDescription: error.localizedDescription)
         }
     }
 

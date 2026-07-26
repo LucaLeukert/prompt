@@ -7,6 +7,7 @@ struct PromptCommandPaletteView: View {
     @ObservedObject var store: PromptWorkspaceStore
     let surface: PromptTerminalSurface?
     @Binding var isPresented: Bool
+    @State private var containerCatalog: PromptLocalSessionLauncher.ContainerCatalog?
 
     var body: some View {
         if isPresented {
@@ -19,6 +20,12 @@ struct PromptCommandPaletteView: View {
                             isPresented: $isPresented,
                             title: nil,
                             content: rootCommands)
+                            .task(id: surface?.workingDirectory ?? NSHomeDirectory()) {
+                                let directory = surface?.workingDirectory ?? NSHomeDirectory()
+                                containerCatalog = await Task.detached {
+                                    PromptLocalSessionLauncher.containerCatalog(directory: directory)
+                                }.value
+                            }
                     }
                     .frame(maxWidth: 720)
                     .promptLiquidGlassSurface(
@@ -36,7 +43,6 @@ struct PromptCommandPaletteView: View {
     @ViewBuilder
     private func rootCommands() -> some View {
         let directory = surface?.workingDirectory ?? NSHomeDirectory()
-        let containerCatalog = PromptSessionLauncher.containerCatalog(directory: directory)
 
         PromptPaletteSection("Create session") {
             PromptPaletteCommand("Current directory") {
@@ -79,27 +85,33 @@ struct PromptCommandPaletteView: View {
 
             PromptPaletteCommand("Container…")
                 .subtitle(
-                    containerCatalog.error == nil
-                        ? "Docker containers and Compose services"
-                        : "Docker is unavailable")
+                    containerCatalog.map {
+                        $0.errorDescription == nil
+                            ? "Docker containers and Compose services"
+                            : "Docker is unavailable"
+                    } ?? "Checking Docker availability…")
                 .help(
-                    containerCatalog.error == nil
-                        ? "Open an interactive shell in a container"
-                        : "Start Docker or Colima to enable container sessions")
+                    containerCatalog.map {
+                        $0.errorDescription == nil
+                            ? "Open an interactive shell in a container"
+                            : "Start Docker or Colima to enable container sessions"
+                    } ?? "Checking whether Docker is available")
                 .icon("shippingbox")
                 .destination(title: "Choose a container") {
-                    PromptPalettePage(
-                        store: store,
-                        isPresented: $isPresented,
-                        title: "Container",
-                        content: {
-                            PromptContainerCommands(
-                                store: store,
-                                directory: directory,
-                                catalog: containerCatalog)
-                        })
+                    if let containerCatalog {
+                        PromptPalettePage(
+                            store: store,
+                            isPresented: $isPresented,
+                            title: "Container",
+                            content: {
+                                PromptContainerCommands(
+                                    store: store,
+                                    directory: directory,
+                                    catalog: containerCatalog)
+                            })
+                    }
                 }
-                .enabled(containerCatalog.error == nil)
+                .enabled(containerCatalog?.errorDescription == nil && containerCatalog != nil)
 
             PromptPaletteCommand("Remote session…")
                 .subtitle("SSH config and Tailscale")
@@ -282,26 +294,23 @@ struct PromptCommandPaletteView: View {
 private struct PromptContainerCommands: View {
     let store: PromptWorkspaceStore
     let directory: String
-    private let catalog: PromptSessionLauncher.ContainerCatalog
+    private let catalog: PromptLocalSessionLauncher.ContainerCatalog
 
-    init(
-        store: PromptWorkspaceStore,
-        directory: String,
-        catalog: PromptSessionLauncher.ContainerCatalog? = nil
-    ) {
+    init(store: PromptWorkspaceStore, directory: String, catalog: PromptLocalSessionLauncher.ContainerCatalog) {
         self.store = store
         self.directory = directory
-        self.catalog = catalog ?? PromptSessionLauncher.containerCatalog(directory: directory)
+        self.catalog = catalog
     }
 
     @ViewBuilder
     var body: some View {
-        if let error = catalog.error {
+        if let errorDescription = catalog.errorDescription {
             PromptPaletteSection("Container") {
                 PromptPaletteCommand("Docker unavailable") {
-                    PromptSessionLauncher.show(error)
+                    PromptSessionLauncher.show(
+                        PromptLocalSessionLauncher.LaunchError.failed(errorDescription))
                 }
-                .subtitle(error.localizedDescription)
+                .subtitle(errorDescription)
                 .help("Install or start Docker and try again")
                 .icon("exclamationmark.triangle")
                 .primaryAction("Show Docker error")
@@ -694,28 +703,6 @@ struct PromptRemoteSession: Codable, Hashable {
                 worktreeOwnership: .prompt)
             store.createLocal(directory: worktree.path, title: branch, behavior: .worktree, details: details)
         } catch { show(error) }
-    }
-
-    struct ContainerCatalog {
-        let containers: [PromptLocalSessionLauncher.Container]
-        let composeServices: [String]
-        let error: Error?
-    }
-
-    static func containerCatalog(directory: String) -> ContainerCatalog {
-        do {
-            let containers = try PromptLocalSessionLauncher.containers()
-            let services = (try? PromptLocalSessionLauncher.composeServices(directory: directory)) ?? []
-            if containers.isEmpty && services.isEmpty {
-                throw PromptLocalSessionLauncher.LaunchError.failed("Docker is available, but no containers or Compose services were found.")
-            }
-            return ContainerCatalog(
-                containers: containers,
-                composeServices: services,
-                error: nil)
-        } catch {
-            return ContainerCatalog(containers: [], composeServices: [], error: error)
-        }
     }
 
     static func open(
