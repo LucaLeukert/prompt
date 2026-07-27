@@ -7,8 +7,8 @@ import SwiftUI
 final class PromptModelTests: XCTestCase {
     @MainActor private static let integrationRuntime = PromptTerminalRuntime()
 
-    func testCICompileProbe() {
-        _ = ciUndefinedSymbol
+    func testCIFailureProbe() {
+        XCTFail("Intentional CI test failure")
     }
 
     private func session() -> PromptSession {
