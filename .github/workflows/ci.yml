@@ -55,8 +55,9 @@ jobs:
         with:
           path: |
             .build/ghostty/.zig-cache
+            .build/ghostty/macos/GhosttyKit.xcframework
             .build/ghostty/zig-out
-          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-zig-0.15-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch') }}
+          key: ghostty-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-zig-0.15-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch') }}
 
       - name: Cache Swift packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
