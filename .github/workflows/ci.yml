@@ -30,6 +30,26 @@ jobs:
           make lint-install
           HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
 
+      # Ghostty is pinned as a submodule and changes far less often than Prompt.
+      # Keep its expensive Zig compilation cache until the toolchain, submodule,
+      # or one of our integration patches changes.
+      - name: Resolve native build cache key
+        id: native-cache
+        run: |
+          echo "ghostty=$(git rev-parse HEAD:Vendor/ghostty)" >> "$GITHUB_OUTPUT"
+          echo "xcode=$(xcodebuild -version | tr '\n' '-' | tr -cd '[:alnum:]._-')" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Ghostty worktree
+        run: make sync
+
+      - name: Cache Ghostty build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            .build/ghostty/.zig-cache
+            .build/ghostty/zig-out
+          key: ghostty-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-zig-0.15-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch') }}
+
       - name: Cache Swift packages
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -37,6 +57,18 @@ jobs:
             DerivedData/SourcePackages
             ~/Library/Caches/org.swift.swiftpm
           key: swiftpm-${{ runner.os }}-${{ hashFiles('Config/Package.resolved') }}
+
+      # Preserve Xcode's incremental build graph and compiled dependencies, but
+      # leave the large index and module caches out. Xcode still recompiles any
+      # Prompt source files changed since this baseline.
+      - name: Cache Xcode build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            DerivedData/Build
+            DerivedData/SDKStatCaches.noindex
+            Artifacts/Debug
+          key: xcode-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch', 'Config/Package.resolved', 'project.yml') }}
 
       - name: Run linters
         run: make lint
