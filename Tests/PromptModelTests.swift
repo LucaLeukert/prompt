@@ -7,7 +7,9 @@ import SwiftUI
 final class PromptModelTests: XCTestCase {
     @MainActor private static let integrationRuntime = PromptTerminalRuntime()
 
-    func ciFormattingProbe( ){ }
+    func testCICompileProbe() {
+        _ = ciUndefinedSymbol
+    }
 
     private func session() -> PromptSession {
         PromptSession(title: "Project", configuration: .local(.init(workingDirectory: "/tmp")), rootPane: PromptPane())
