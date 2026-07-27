@@ -77,7 +77,8 @@ jobs:
             DerivedData/Build
             DerivedData/SDKStatCaches.noindex
             Artifacts/Debug
-          key: xcode-debug-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch', 'Config/Package.resolved', 'project.yml', 'Makefile') }}
+            Prompt.xcodeproj
+          key: xcode-debug-v3-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch', 'Config/Package.resolved', 'project.yml', 'Makefile') }}
 
       - name: Build and test
         env:
