@@ -26,9 +26,7 @@ jobs:
           submodules: recursive
 
       - name: Install development tools
-        run: |
-          make lint-install
-          HOMEBREW_NO_AUTO_UPDATE=1 brew install zig@0.15
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install swiftformat swiftlint actionlint xcodegen zig@0.15
 
       # Ghostty is pinned as a submodule and changes far less often than Prompt.
       # Keep its expensive Zig compilation cache until the toolchain, submodule,
@@ -42,7 +40,17 @@ jobs:
       - name: Prepare Ghostty worktree
         run: make sync
 
+      - name: Run linters
+        run: make lint
+
+      # actions/checkout and make sync give every source file a fresh mtime.
+      # Restore deterministic mtimes before loading Xcode's incremental state,
+      # so unchanged files remain older than their cached object files.
+      - name: Restore source timestamps
+        run: python3 Scripts/restore-source-mtimes.py
+
       - name: Cache Ghostty build
+        id: ghostty-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -68,10 +76,15 @@ jobs:
             DerivedData/Build
             DerivedData/SDKStatCaches.noindex
             Artifacts/Debug
-          key: xcode-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch', 'Config/Package.resolved', 'project.yml') }}
-
-      - name: Run linters
-        run: make lint
+          key: xcode-debug-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-cache.outputs.xcode }}-${{ steps.native-cache.outputs.ghostty }}-${{ hashFiles('Patches/ghostty/*.patch', 'Config/Package.resolved', 'project.yml', 'Makefile') }}
 
       - name: Build and test
-        run: make test
+        env:
+          GHOSTTY_CACHE_HIT: ${{ steps.ghostty-cache.outputs.cache-hit }}
+        run: |
+          target="test"
+          if [[ "$GHOSTTY_CACHE_HIT" == "true" ]]; then
+            target="test-prepared"
+          fi
+          make "$target" \
+            XCODEBUILD_SETTINGS="DEBUG_INFORMATION_FORMAT=dwarf COMPILER_INDEX_STORE_ENABLE=NO"

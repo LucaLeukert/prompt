@@ -15,7 +15,7 @@ EXECUTABLE := $(APP)/Contents/MacOS/Prompt
 # prefix after it installs zig@0.15, so first-time setup works on either CPU.
 ZIG ?=
 
-.PHONY: help build run test lint format lint-install xcode clean prepare sync patch-check project check-app check-vendor
+.PHONY: help build run test test-prepared lint format lint-install xcode clean prepare sync patch-check project check-app check-ghostty-build check-vendor
 
 help:
 	@echo "Prompt local development"
@@ -125,7 +125,9 @@ run: build
 	pkill -f "^$(EXECUTABLE)$$" 2>/dev/null || true
 	open -na "$(APP)"
 
-test: prepare
+test: prepare test-prepared
+
+test-prepared: check-ghostty-build
 	xcodebuild test \
 		-project "$(PROJECT)" \
 		-scheme Prompt \
@@ -134,7 +136,19 @@ test: prepare
 		CONFIGURATION_BUILD_DIR="$(ARTIFACT_DIR)" \
 		-disableAutomaticPackageResolution \
 		-onlyUsePackageVersionsFromResolvedFile \
-		CODE_SIGNING_ALLOWED=NO
+		CODE_SIGNING_ALLOWED=NO $(XCODEBUILD_SETTINGS)
+
+check-ghostty-build:
+	@set -eu; \
+	for required_path in \
+		"$(GHOSTTY_BUILD)/macos/GhosttyKit.xcframework" \
+		"$(GHOSTTY_BUILD)/zig-out/share/terminfo"; \
+	do \
+		if [ ! -e "$$required_path" ]; then \
+			echo "Prepared Ghostty output is missing: $$required_path" >&2; \
+			exit 1; \
+		fi; \
+	done
 
 lint:
 	@command -v swiftformat >/dev/null || { echo "Missing swiftformat; run: make lint-install" >&2; exit 1; }
