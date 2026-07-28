@@ -58,9 +58,44 @@ class GhosttyAppKitSurface: ObservableObject {
         return ghostty_surface_is_alternate_screen(surfaceHandle)
     }
 
+    /// The live Ghostty font size, including per-surface zoom adjustments.
+    var terminalFontSize: CGFloat {
+        guard let surfaceHandle else { return 13 }
+        return max(1, CGFloat(ghostty_surface_font_size(surfaceHandle)))
+    }
+
     func setHostCursorVisible(_ visible: Bool) {
         guard let surfaceHandle else { return }
         ghostty_surface_set_host_cursor_visible(surfaceHandle, visible)
+    }
+
+    struct HostContentReservation {
+        let anchorRow: Int
+        let rows: Int
+        let rowSpaceRevision: UInt64
+    }
+
+    /// Allocate real Ghostty rows for a host-rendered transcript attachment.
+    /// Cursor and scrollback mutation stay inside the terminal core.
+    func reserveHostContent(rows: Int, clearCursorRow: Bool) -> HostContentReservation? {
+        guard let surfaceHandle, rows > 0, rows <= Int(UInt32.max) else { return nil }
+        var value = ghostty_surface_host_content_s()
+        guard ghostty_surface_reserve_host_content(
+            surfaceHandle,
+            UInt32(rows),
+            clearCursorRow,
+            &value
+        ) else { return nil }
+        return HostContentReservation(
+            anchorRow: Int(clamping: value.anchor_row),
+            rows: Int(value.rows),
+            rowSpaceRevision: value.row_space_revision)
+    }
+
+    /// Grow the attachment immediately above the live prompt.
+    func growHostContent(rows: Int) -> Bool {
+        guard let surfaceHandle, rows > 0, rows <= Int(UInt32.max) else { return false }
+        return ghostty_surface_grow_host_content(surfaceHandle, UInt32(rows))
     }
 
     func promptInput() -> String? {

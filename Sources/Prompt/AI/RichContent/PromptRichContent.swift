@@ -37,13 +37,13 @@ final class PromptRichContentStore: ObservableObject {
 
     func begin(request: String, lane: PromptAILane, model: String, on surface: PromptTerminalSurface) -> UUID {
         let id = UUID()
-        let anchor = absoluteCursorRow(on: surface)
         // Start compact and grow the backing terminal rows as tools and the
         // structured response arrive.
-        let rows = 6
-        if PromptTerminalCapabilities.remoteContext(for: surface) == nil || surface.isComposite {
-            reserve(rows: rows, on: surface, clearPromptRow: true)
-        }
+        let rows = 2
+        let ownsTerminalRows = PromptTerminalCapabilities.remoteContext(for: surface) == nil || surface.isComposite
+        let anchor = ownsTerminalRows
+            ? reserve(rows: rows, on: surface, clearPromptRow: false)
+            : absoluteCursorRow(on: surface)
         blocks.append(.init(
             id: id,
             surfaceID: ObjectIdentifier(surface),
@@ -66,9 +66,8 @@ final class PromptRichContentStore: ObservableObject {
         on surface: PromptTerminalSurface
     ) {
         let id = UUID()
-        let anchor = absoluteCursorRow(on: surface)
         let rows = 3
-        reserve(rows: rows, on: surface, clearPromptRow: true)
+        let anchor = reserve(rows: rows, on: surface, clearPromptRow: true)
         blocks.append(.init(
             id: id,
             surfaceID: ObjectIdentifier(surface),
@@ -147,8 +146,8 @@ final class PromptRichContentStore: ObservableObject {
     /// Once the user submits more terminal input, the live prompt no longer
     /// sits immediately after an in-flight card. Growing that card with VT
     /// insert-line sequences would then move or overwrite unrelated output.
-    /// Freeze its existing inline allocation; excess content scrolls inside
-    /// the card instead.
+    /// Freeze its existing inline allocation once later terminal output makes
+    /// inserting rows at the live prompt unsafe.
     func freezeReservations(for surface: PromptTerminalSurface) {
         let surfaceID = ObjectIdentifier(surface)
         for index in blocks.indices where blocks[index].surfaceID == surfaceID {
@@ -175,7 +174,7 @@ final class PromptRichContentStore: ObservableObject {
         let cellHeight = max(1, surface.cellSize.height)
         // Include the small visual separation above the following prompt and
         // convert the native SwiftUI layout to the VT's physical row grid.
-        let required = max(6, Int(ceil((height + 4) / cellHeight)))
+        let required = max(2, Int(ceil((height + 1) / cellHeight)))
         let target = Self.nextReservationRows(
             current: blocks[index].reservedRows,
             required: required,
@@ -198,11 +197,12 @@ final class PromptRichContentStore: ObservableObject {
                 total + max(1, Int(ceil(Double(max(1, line.count)) / Double(max(1, columns)))))
             }
         }
-        // Header, AI label and card padding consume four terminal rows. Tool
-        // calls are compact one-row pills; response wrapping uses terminal
-        // columns with a little safety for proportional Markdown typography.
-        let rows = 4 + min(2, visualLines(request)) + toolCalls + visualLines(response)
-        return min(80, max(6, rows + 2))
+        // The submitted request remains in Ghostty's ordinary terminal cells.
+        // The metadata header consumes one row. Tool calls are compact one-row
+        // entries and the response follows the terminal's wrapping width.
+        _ = request
+        let rows = 1 + toolCalls + visualLines(response)
+        return max(2, rows)
     }
 
     nonisolated static func nextReservationRows(
@@ -216,15 +216,8 @@ final class PromptRichContentStore: ObservableObject {
     }
 
     private func insertRowsBeforePrompt(_ rows: Int, on surface: PromptTerminalSurface) {
-        guard rows > 0, let terminal = surface.surface else { return }
-        var x = 0.0, y = 0.0, width = 0.0, height = 0.0
-        ghostty_surface_ime_point(terminal, &x, &y, &width, &height)
-        let column = max(1, Int(x / max(1, surface.cellSize.width)) + 1)
-        // IL shifts the complete prompt row down without repainting it. Move
-        // Ghostty's parser cursor by the same amount and restore its column so
-        // subsequent readline/ZLE input continues at the shifted prompt.
-        let sequence = "\r\u{001B}[\(rows)L\u{001B}[\(rows)B\u{001B}[\(column)G"
-        sequence.withCString { ghostty_surface_process_output(terminal, $0, UInt(sequence.utf8.count)) }
+        guard rows > 0 else { return }
+        _ = surface.growHostContent(rows: rows)
     }
 
     private func drain(_ id: UUID, on surface: PromptTerminalSurface) {
@@ -266,9 +259,9 @@ final class PromptRichContentStore: ObservableObject {
 
     private func maximumCardRows(on surface: PromptTerminalSurface) -> Int {
         let viewportRows = Int(surface.nativeView.bounds.height / max(1, surface.cellSize.height))
-        // Leave enough terminal visible to retain spatial context and expose
-        // the prompt below the card. Taller responses scroll inside the card.
-        return max(6, viewportRows - 4)
+        // Rich content is terminal history. Permit it to exceed the viewport
+        // so Ghostty's scrollback remains the only scroll owner.
+        return max(10_000, viewportRows)
     }
 
     private func finishDrain(_ id: UUID, on surface: PromptTerminalSurface) {
@@ -291,11 +284,9 @@ final class PromptRichContentStore: ObservableObject {
         return Int(surface.scrollbar?.offset ?? 0) + viewportRow
     }
 
-    private func reserve(rows: Int, on surface: PromptTerminalSurface, clearPromptRow: Bool) {
-        guard rows > 0, let terminal = surface.surface else { return }
-        var layout = clearPromptRow ? "\r\u{001B}[2K" : ""
-        layout += String(repeating: "\r\n", count: rows)
-        layout.withCString { ghostty_surface_process_output(terminal, $0, UInt(layout.utf8.count)) }
+    private func reserve(rows: Int, on surface: PromptTerminalSurface, clearPromptRow: Bool) -> Int {
+        surface.reserveHostContent(rows: rows, clearCursorRow: clearPromptRow)?.anchorRow
+            ?? absoluteCursorRow(on: surface)
     }
 }
 
@@ -315,15 +306,14 @@ struct PromptRichContentLayer: View {
                     PromptInlineRichBlockFrame(
                         block: block,
                         surfaceView: surfaceView,
-                        width: max(240, geometry.size.width - 16),
+                        width: max(240, geometry.size.width),
                         height: height)
                         .position(
                             x: geometry.size.width / 2,
                             // The cursor row includes Ghostty's prompt line. Pull
-                            // the host block into that cleared row, leaving only a
-                            // compact four-point separation from prior TTY output.
+                            // the host block into its exact Ghostty-owned row range.
                             y: CGFloat(block.anchorRow - viewportOffset) * max(1, surfaceView.cellSize.height)
-                                + height / 2 - max(0, surfaceView.cellSize.height - 4))
+                                + height / 2)
                 }
             }
         }
@@ -341,7 +331,10 @@ struct PromptRichContentLayer: View {
         .onReceive(environmentTimer) { _ in
             allowsRichContent = PromptTerminalEnvironment.allowsRichContent(on: surfaceView)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .ghosttyDidUpdateScrollbar, object: surfaceView)) { note in
+        .onReceive(NotificationCenter.default.publisher(
+            for: .ghosttyDidUpdateScrollbar,
+            object: surfaceView.hostedView
+        )) { note in
             guard let scrollbar = note.userInfo?[Notification.Name.ScrollbarKey] as? Ghostty.Action.Scrollbar else { return }
             if previousTotal > 0 && Int(scrollbar.total) < previousTotal {
                 store.clear(for: surfaceView)
@@ -358,34 +351,22 @@ private struct PromptInlineRichBlockFrame: View {
     let width: CGFloat
     let height: CGFloat
 
-    private var overflowsReservation: Bool {
-        block.measuredHeight > height + 1
-    }
-
     var body: some View {
-        Group {
-            if overflowsReservation {
-                ScrollView(.vertical, showsIndicators: true) {
-                    richContent.frame(width: width)
-                }
-                .frame(width: width, height: height)
-                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            } else {
-                richContent
-                    .frame(width: width)
-                    .frame(height: height, alignment: .top)
-                    .clipped()
-            }
-        }
+        richContent
+            .frame(width: width)
+            .frame(height: height, alignment: .top)
         .frame(width: width, height: height, alignment: .top)
-        // Static assistant cards are visual terminal history, so let Ghostty
-        // receive wheel/trackpad events through them. A card only becomes the
-        // scroll owner when its content exceeds its fixed inline reservation;
-        // agent approvals and ambient actions remain interactive as well.
-        .allowsHitTesting(
-            overflowsReservation
-                || block.lane == .agent
-                || !block.recommendationActions.isEmpty)
+        // These rows belong to host-rendered terminal history. Let their
+        // selectable text receive mouse gestures instead of passing drags
+        // through to Ghostty's intentionally blank backing cells.
+        .contentShape(Rectangle())
+        .allowsHitTesting(true)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard let terminal = surfaceView.surface else { return }
+                    _ = ghostty_surface_clear_selection(terminal)
+                })
     }
 
     @ViewBuilder
@@ -481,7 +462,7 @@ private struct PromptAmbientActionButtons: View {
     let actions: [PromptRecommendationAction]
     let blockID: UUID
     let surfaceView: PromptTerminalSurface
-    @ObservedObject private var model = PromptModel.shared
+    @ObservedObject private var model = AIModel.shared
 
     var body: some View {
         HStack(spacing: 6) {
@@ -511,36 +492,12 @@ private struct PromptAmbientActionButtons: View {
 private struct PromptRichConversationCard: View {
     let block: PromptRichBlock
     let surfaceView: PromptTerminalSurface
-    @ObservedObject private var model = PromptModel.shared
+    @ObservedObject private var model = AIModel.shared
 
     private var laneLabel: String {
         switch block.lane {
         case .assistant: "ASSISTANT"
         case .agent: "AGENT"
-        }
-    }
-
-    private var laneSymbol: String {
-        switch block.lane {
-        case .assistant: "bubble.left.and.text.bubble.right"
-        case .agent: "hammer"
-        }
-    }
-
-    private var stateColor: Color {
-        switch block.state {
-        case .failed: .red
-        case .cancelled: .orange
-        case .streaming, .complete: .accentColor
-        }
-    }
-
-    private var stateSymbol: String {
-        switch block.state {
-        case .failed: "exclamationmark.triangle.fill"
-        case .cancelled: "stop.circle.fill"
-        case .streaming: "sparkles"
-        case .complete: "checkmark.circle.fill"
         }
     }
 
@@ -570,38 +527,20 @@ private struct PromptRichConversationCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: laneSymbol)
-                    .font(.system(size: 13, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(stateColor)
-                    .frame(width: 28, height: 28)
-                    .background(stateColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(laneLabel)
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text(block.model)
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text(block.request)
-                        .font(.custom(PromptTypography.mono, size: 12.25))
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(laneLabel.lowercased())
+                    .foregroundStyle(.secondary)
+                if !block.model.isEmpty {
+                    Text("· \(block.model)")
+                        .foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 8)
                 if block.state == .streaming {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: stateSymbol)
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(stateColor)
+                    Text("…").foregroundStyle(.tertiary)
                 }
             }
+            .font(.custom(PromptTypography.mono, size: surfaceView.terminalFontSize))
 
             if !block.toolCalls.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
@@ -622,16 +561,10 @@ private struct PromptRichConversationCard: View {
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(toolStateColor(call.state))
                         }
-                        .font(.custom(PromptTypography.mono, size: 11.25))
+                        .font(.custom(PromptTypography.mono, size: surfaceView.terminalFontSize))
                         .padding(.horizontal, 9)
                         .padding(.vertical, 6)
-                        if call.id != block.toolCalls.last?.id { Divider().padding(.leading, 33) }
                     }
-                }
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.48), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.5)
                 }
             }
             if block.lane == .agent {
@@ -649,7 +582,7 @@ private struct PromptRichConversationCard: View {
                         Button("Allow") { model.approve(approval, decision: "accept") }
                             .buttonStyle(.borderedProminent)
                     }
-                    .font(.custom(PromptTypography.sans, size: 11.5))
+                    .font(.custom(PromptTypography.mono, size: surfaceView.terminalFontSize))
                     .controlSize(.small)
                     .padding(9)
                     .background(Color.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -664,18 +597,21 @@ private struct PromptRichConversationCard: View {
                     Image(systemName: "ellipsis")
                     Text("Thinking")
                 }
-                .font(.custom(PromptTypography.sans, size: 12.5))
+                .font(.custom(PromptTypography.mono, size: surfaceView.terminalFontSize))
                 .foregroundStyle(.tertiary)
             } else {
-                Divider()
-                PromptRichDocument(source: block.response)
+                PromptRichDocument(
+                    source: block.response,
+                    fontSize: surfaceView.terminalFontSize)
             }
         }
         // Rich history owns selection inside its visible card. Outside these
         // painted bounds the transparent overlay has no hit-test content, so
         // pointer events continue to reach Ghostty normally.
         .textSelection(.enabled)
-        .padding(.horizontal, 12).padding(.vertical, 10)
+        .padding(.leading, max(1, surfaceView.cellSize.width))
+        .padding(.trailing, max(1, surfaceView.cellSize.width))
+        .padding(.vertical, 2)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         // The parent frame represents rows already reserved in the VT. Do not
         // let that stale proposal constrain layout measurement: Markdown,
@@ -688,26 +624,19 @@ private struct PromptRichConversationCard: View {
                     value: [block.id: geometry.size.height])
             }
         }
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 0.5)
-        }
-        .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
-        .overlay(alignment: .leading) {
-            Capsule().fill(stateColor).frame(width: 2).padding(.vertical, 9)
-        }
     }
 }
 
 enum PromptRichSegment: Identifiable, Equatable {
     case markdown(String)
-    case math(String)
+    case inlineLatex(String)
+    case displayLatex(String)
 
     var id: String {
         switch self {
         case .markdown(let value): "markdown:\(value)"
-        case .math(let value): "math:\(value)"
+        case .inlineLatex(let value): "inline-latex:\(value)"
+        case .displayLatex(let value): "display-latex:\(value)"
         }
     }
 }
@@ -729,11 +658,47 @@ enum PromptRichParser {
 
         while cursor < source.endIndex {
             let suffix = source[cursor...]
+            if suffix.hasPrefix("```") {
+                guard let openingEnd = source[cursor...].firstIndex(of: "\n") else {
+                    markdown.append(contentsOf: suffix)
+                    break
+                }
+                guard let closingRange = source.range(
+                    of: "```",
+                    range: source.index(after: openingEnd) ..< source.endIndex
+                ) else {
+                    markdown.append(contentsOf: suffix)
+                    break
+                }
+                let language = source[source.index(cursor, offsetBy: 3) ..< openingEnd]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let bodyStart = source.index(after: openingEnd)
+                let body = String(source[bodyStart ..< closingRange.lowerBound])
+                if language == "latex" || language == "tex" {
+                    flushMarkdown()
+                    let latex = latexDocumentBody(body)
+                    if !latex.isEmpty { result.append(.displayLatex(latex)) }
+                } else {
+                    markdown.append(contentsOf: source[cursor ..< closingRange.upperBound])
+                }
+                cursor = closingRange.upperBound
+                continue
+            }
+            if suffix.hasPrefix("`"),
+               let closing = source[cursor...].dropFirst().firstIndex(of: "`") {
+                let end = source.index(after: closing)
+                markdown.append(contentsOf: source[cursor ..< end])
+                cursor = end
+                continue
+            }
             let opener: String
             let closer: String
-            if suffix.hasPrefix("$$") { opener = "$$"; closer = "$$" }
-            else if suffix.hasPrefix("\\[") { opener = "\\["; closer = "\\]" }
-            else if suffix.hasPrefix("$") { opener = "$"; closer = "$" }
+            let display: Bool
+            if suffix.hasPrefix("$$") { opener = "$$"; closer = "$$"; display = true }
+            else if suffix.hasPrefix("\\[") { opener = "\\["; closer = "\\]"; display = true }
+            else if suffix.hasPrefix("\\(") { opener = "\\("; closer = "\\)"; display = false }
+            else if suffix.hasPrefix("$") { opener = "$"; closer = "$"; display = false }
             else {
                 markdown.append(source[cursor])
                 cursor = source.index(after: cursor)
@@ -749,41 +714,134 @@ enum PromptRichParser {
                 break
             }
             flushMarkdown()
-            let formula = String(source[bodyStart ..< closeRange.lowerBound])
+            let latex = String(source[bodyStart ..< closeRange.lowerBound])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !formula.isEmpty { result.append(.math(formula)) }
+            if !latex.isEmpty {
+                result.append(display ? .displayLatex(latex) : .inlineLatex(latex))
+            }
             cursor = closeRange.upperBound
         }
         flushMarkdown()
         return result
     }
+
+    private static func latexDocumentBody(_ source: String) -> String {
+        var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let opening = value.range(of: "\\["),
+           let closing = value.range(of: "\\]", range: opening.upperBound ..< value.endIndex) {
+            return String(value[opening.upperBound ..< closing.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        for wrapper in [
+            #"\\documentclass(?:\[[^\]]*\])?\{[^}]*\}"#,
+            #"\\begin\{document\}"#,
+            #"\\end\{document\}"#,
+        ] {
+            value = value.replacingOccurrences(
+                of: wrapper,
+                with: "",
+                options: .regularExpression)
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 private struct PromptRichDocument: View {
     let source: String
+    let fontSize: CGFloat
 
     var body: some View {
-        let segments = PromptRichParser.segments(source)
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(segments) { segment in
-                switch segment {
-                case .markdown(let markdown):
-                    Markdown(markdown)
-                        .markdownTextStyle { FontFamily(.custom(PromptTypography.sans)) }
-                        .markdownTextStyle { FontSize(13.5) }
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                case .math(let formula):
-                    PromptMathView(latex: formula)
-                        .frame(minHeight: 28)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+        documentText(PromptRichParser.segments(source))
+            .font(.custom(PromptTypography.mono, size: fontSize))
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// SwiftUI selection cannot cross sibling Markdown views. Compose the
+    /// complete response into one Text value so headings, prose and formula
+    /// attachments share one native selection range.
+    private func documentText(_ segments: [PromptRichSegment]) -> Text {
+        segments.reduce(Text("")) { result, segment in
+            switch segment {
+            case .markdown(let markdown):
+                return result + markdownText(markdown)
+            case .inlineLatex(let latex):
+                guard let image = PromptLatexRenderer.image(latex: latex, fontSize: fontSize) else {
+                    return result + Text("\\(\(latex)\\)")
                 }
+                return result + Text(Image(nsImage: image))
+            case .displayLatex(let latex):
+                guard let image = PromptLatexRenderer.image(
+                    latex: latex,
+                    fontSize: fontSize,
+                    display: true
+                ) else {
+                    return result + Text("\\[\n\(latex)\n\\]")
+                }
+                return result + Text("\n") + Text(Image(nsImage: image)) + Text("\n")
             }
         }
     }
+
+    private func markdownText(_ markdown: String) -> Text {
+        let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false)
+        var inCodeFence = false
+        return lines.enumerated().reduce(Text("")) { result, item in
+            let (index, rawLine) = item
+            let line = String(rawLine)
+            let separator = index == lines.indices.last ? Text("") : Text("\n")
+
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inCodeFence.toggle()
+                return result + separator
+            }
+            if inCodeFence {
+                return result + Text(line) + separator
+            }
+
+            let hashes = line.prefix { $0 == "#" }.count
+            if (1 ... 6).contains(hashes),
+               line.dropFirst(hashes).first == " " {
+                let title = String(line.dropFirst(hashes + 1))
+                let scale = max(1.0, 1.65 - CGFloat(hashes - 1) * 0.13)
+                return result
+                    + Text(inlineMarkdown(title))
+                        .font(.custom(PromptTypography.mono, size: fontSize * scale).weight(.bold))
+                    + separator
+            }
+            return result + Text(inlineMarkdown(line)) + separator
+        }
+    }
+
+    private func inlineMarkdown(_ source: String) -> AttributedString {
+        (try? AttributedString(
+            markdown: source,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        )) ?? AttributedString(source)
+    }
 }
 
-private struct PromptMathView: NSViewRepresentable {
+enum PromptLatexRenderer {
+    static func canRender(_ latex: String) -> Bool {
+        var error: NSError?
+        return MTMathListBuilder.build(fromString: latex, error: &error) != nil
+            && error == nil
+    }
+
+    static func image(latex: String, fontSize: CGFloat, display: Bool = false) -> NSImage? {
+        let renderer = MTMathImage(
+            latex: latex,
+            fontSize: fontSize * (display ? 1.15 : 1.05),
+            textColor: NSColor.labelColor,
+            labelMode: display ? .display : .text,
+            textAlignment: .left)
+        renderer.contentInsets = MTEdgeInsets(top: 1, left: 1, bottom: 1, right: 1)
+        return renderer.asImage().1
+    }
+}
+
+private struct PromptLatexView: NSViewRepresentable {
     let latex: String
+    let fontSize: CGFloat
 
     func makeNSView(context: Context) -> MTMathUILabel {
         let label = MTMathUILabel()
@@ -796,7 +854,9 @@ private struct PromptMathView: NSViewRepresentable {
     func updateNSView(_ view: MTMathUILabel, context: Context) {
         guard view.latex != latex else { return }
         view.latex = latex
-        view.font = MTFontManager().font(withName: MathFont.latinModernFont.rawValue, size: 17)
+        view.font = MTFontManager().font(
+            withName: MathFont.latinModernFont.rawValue,
+            size: fontSize * 1.15)
         view.textColor = NSColor.labelColor
         view.invalidateIntrinsicContentSize()
     }

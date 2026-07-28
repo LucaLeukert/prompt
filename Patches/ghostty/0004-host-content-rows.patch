@@ -1,0 +1,143 @@
+diff --git a/include/ghostty.h b/include/ghostty.h
+index ee8aa8bcb..239c8232e 100644
+--- a/include/ghostty.h
++++ b/include/ghostty.h
+@@ -524,6 +524,15 @@ typedef struct {
+   uint64_t row_space_revision;
+ } ghostty_surface_scrollbar_s;
+ 
++// Host-owned content occupies real rows in Ghostty's scrollback. Ghostty
++// remains authoritative for cursor movement and row allocation while the
++// embedder renders richer content into the returned row range.
++typedef struct {
++  uint64_t anchor_row;
++  uint64_t row_space_revision;
++  uint32_t rows;
++} ghostty_surface_host_content_s;
++
+ // Config types
+ 
+ // config.Path
+@@ -1205,6 +1214,18 @@ GHOSTTY_API bool ghostty_surface_scroll_to_row_if_revision(
+     uint64_t,
+     uint64_t,
+     ghostty_surface_scrollbar_s*);
++// Reserve rows starting at the cursor and leave the cursor below them.
++// When clear_cursor_row is true, the cursor row is cleared before reservation.
++GHOSTTY_API bool ghostty_surface_reserve_host_content(
++    ghostty_surface_t,
++    uint32_t,
++    bool,
++    ghostty_surface_host_content_s*);
++// Insert rows immediately above the cursor, preserving its column. This is
++// intended to grow the most recent host-content reservation.
++GHOSTTY_API bool ghostty_surface_grow_host_content(
++    ghostty_surface_t,
++    uint32_t);
+ GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
+ GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
+ // cmux fork: export the Ghostty grid as a compact render-grid JSON frame for
+diff --git a/src/apprt/embedded.zig b/src/apprt/embedded.zig
+index 017688311..2cf6152bd 100644
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -1426,6 +1426,12 @@ pub const CAPI = struct {
+         row_space_revision: u64,
+     };
+ 
++    const SurfaceHostContent = extern struct {
++        anchor_row: u64,
++        row_space_revision: u64,
++        rows: u32,
++    };
++
+     // ghostty_clipboard_content_s
+     const ClipboardContent = extern struct {
+         mime: [*:0]const u8,
+@@ -2145,6 +2151,86 @@ pub const CAPI = struct {
+         return true;
+     }
+ 
++    /// Reserve terminal-owned rows for content rendered by the embedder.
++    ///
++    /// This deliberately operates on the terminal model instead of feeding
++    /// private ANSI back through the VT parser. The rows therefore participate
++    /// in Ghostty's normal scrollback, selection geometry, and cursor model.
++    export fn ghostty_surface_reserve_host_content(
++        surface: *Surface,
++        rows: u32,
++        clear_cursor_row: bool,
++        result: *SurfaceHostContent,
++    ) bool {
++        if (rows == 0) return false;
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.lockDemand();
++        {
++            defer core_surface.renderer_state.unlockDemand();
++            const terminal_state = core_surface.renderer_state.terminal;
++            terminal_state.carriageReturn();
++            if (clear_cursor_row) {
++                terminal_state.eraseLine(.complete, false);
++            } else {
++                // Preserve the submitted prompt as ordinary terminal history.
++                // Host content starts on the following row.
++                terminal_state.linefeed() catch return false;
++            }
++            const screen = terminal_state.screens.active;
++            const positioned = screen.pages.scrollbar();
++            const anchor = positioned.offset + screen.cursor.y;
++            for (0..rows) |_| terminal_state.linefeed() catch return false;
++
++            const screens = &terminal_state.screens;
++            const screen_key = screens.active_key;
++            const after = screens.active.pages.scrollbar();
++            result.* = .{
++                .anchor_row = @intCast(anchor),
++                .row_space_revision = core_surface.rowSpaceIdentity(
++                    screen_key,
++                    screens.generation(screen_key),
++                    after.row_space_revision,
++                ),
++                .rows = rows,
++            };
++        }
++        surface.refresh();
++        return true;
++    }
++
++    /// Grow the reservation directly above the current cursor while retaining
++    /// readline/ZLE's cursor column.
++    export fn ghostty_surface_grow_host_content(
++        surface: *Surface,
++        rows: u32,
++    ) bool {
++        if (rows == 0) return true;
++        const core_surface = &surface.core_surface;
++        core_surface.renderer_state.lockDemand();
++        {
++            defer core_surface.renderer_state.unlockDemand();
++            const terminal_state = core_surface.renderer_state.terminal;
++            const column = terminal_state.screens.active.cursor.x;
++            const cursor_y = terminal_state.screens.active.cursor.y;
++            const bottom = terminal_state.scrolling_region.bottom;
++            const available = bottom - cursor_y;
++            const overflow = rows - @min(rows, available);
++            if (overflow > 0) {
++                // Make room in the viewport before inserting. scrollUp moves
++                // the live prompt upward while preserving the cursor's screen
++                // coordinate; cursorUp reunites the cursor with that prompt
++                // so insertLines can move both down together.
++                terminal_state.scrollUp(overflow) catch return false;
++                terminal_state.cursorUp(overflow);
++            }
++            terminal_state.insertLines(@intCast(rows));
++            terminal_state.cursorDown(@intCast(rows));
++            terminal_state.screens.active.cursorHorizontalAbsolute(column);
++        }
++        surface.refresh();
++        return true;
++    }
++
+     const RenderGridStyle = struct {
+         id: u32,
+         foreground: terminal.color.RGB,
