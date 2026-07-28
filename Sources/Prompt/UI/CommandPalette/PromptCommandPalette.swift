@@ -94,7 +94,7 @@ struct PromptCommandPaletteView: View {
                     containerCatalog.map {
                         $0.errorDescription == nil
                             ? "Open an interactive shell in a container"
-                            : "Start Docker or Colima to enable container sessions"
+                            : "Start Docker to enable container sessions"
                     } ?? "Checking whether Docker is available")
                 .icon("shippingbox")
                 .destination(title: "Choose a container") {
