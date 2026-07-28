@@ -6,7 +6,7 @@ import MarkdownUI
 import SwiftMath
 import SwiftUI
 
-final class CodexAppServer {
+final class CodexRPCClient {
     enum ServerError: LocalizedError {
         case executableMissing, exited, response(String)
         var errorDescription: String? {
@@ -30,9 +30,6 @@ final class CodexAppServer {
 
     init(service: String) {
         self.service = service
-        #if DEBUG
-            PromptAIDebug.emit(service, "state", "service created")
-        #endif
     }
 
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
@@ -50,6 +47,19 @@ final class CodexAppServer {
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = ["app-server"]
+        let providerHome = PromptPaths().providerDirectory(.codex)
+        let sqliteHome = providerHome.appendingPathComponent("sqlite", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: sqliteHome,
+                withIntermediateDirectories: true)
+        } catch {
+            completion(.failure(error)); return
+        }
+        var environment = ProcessInfo.processInfo.environment
+        environment["CODEX_HOME"] = providerHome.path
+        environment["CODEX_SQLITE_HOME"] = sqliteHome.path
+        process.environment = environment
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
@@ -111,6 +121,14 @@ final class CodexAppServer {
                 completion(.failure(error))
             }
         }
+    }
+
+    func stop() {
+        input?.closeFile()
+        process?.terminate()
+        process = nil
+        input = nil
+        callbacks.removeAll()
     }
 
     func request(_ method: String, params: [String: Any], completion: @escaping (Result<[String: Any], Error>) -> Void) {

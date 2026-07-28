@@ -13,6 +13,9 @@ configs:
   ReleaseLocal: release
 
 packages:
+  OpenAI:
+    url: https://github.com/MacPaw/OpenAI.git
+    exactVersion: 0.5.1
   MarkdownUI:
     url: https://github.com/gonzalezreal/MarkdownUI.git
     exactVersion: 2.4.1
@@ -65,6 +68,7 @@ targets:
     dependencies:
       - framework: .build/ghostty/macos/GhosttyKit.xcframework
       - package: MarkdownUI
+      - package: OpenAI
       - package: Sparkle
       - package: SwiftMath
       - package: SwiftLog

@@ -32,7 +32,7 @@ private final class PromptModeTabMonitor: ObservableObject {
             case .consume:
                 return true
             case .acceptAutocomplete:
-                _ = PromptAutocompleteModel.shared.accept(on: surfaceView)
+                _ = AutocompleteModel.shared.accept(on: surfaceView)
                 return true
             case .switchMode(let mode):
                 PromptNativeInputRouter.selectSurfaceModeFromKeyboard(mode, for: surfaceView)
@@ -267,8 +267,9 @@ private struct PromptPointingHandCursor: ViewModifier {
 /// Ghostty's native caret but never replaces or captures terminal input.
 struct PromptNativeModeBadge: View {
     @ObservedObject var surfaceView: PromptTerminalSurface
-    @ObservedObject private var model = PromptModel.shared
-    @ObservedObject private var autocomplete = PromptAutocompleteModel.shared
+    @ObservedObject private var model = AIModel.shared
+    @ObservedObject private var autocomplete = AutocompleteModel.shared
+    @ObservedObject private var registry = AIProviderRegistry.shared
     @StateObject private var tabMonitor = PromptModeTabMonitor()
     @State private var input: String? = nil
     @State private var selectedSurfaceMode: PromptSurfaceMode = .autoShell
@@ -305,6 +306,10 @@ struct PromptNativeModeBadge: View {
         }
     }
 
+    private var availableModes: Set<PromptSurfaceMode> {
+        Set(PromptSurfaceMode.allCases.filter { $0.isAvailable(on: surfaceView) })
+    }
+
     var body: some View {
         GeometryReader { geometry in
             if input != nil && !model.ownsTerminalInput(surfaceView) {
@@ -332,7 +337,8 @@ struct PromptNativeModeBadge: View {
                     .popover(isPresented: $showsModePicker, arrowEdge: .bottom) {
                         PromptModePicker(
                             selection: surfaceMode,
-                            supportsAgent: !PromptTerminalCapabilities.isManagedRemote(surfaceView),
+                            availableModes: availableModes,
+                            isRemote: PromptTerminalCapabilities.isManagedRemote(surfaceView),
                             select: { candidate in
                                 showsModePicker = false
                                 PromptNativeInputRouter.selectSurfaceMode(candidate, for: surfaceView)
@@ -343,7 +349,8 @@ struct PromptNativeModeBadge: View {
                 if showsKeyboardModePicker {
                     PromptModePickerPreview(
                         selection: surfaceMode,
-                        supportsAgent: !PromptTerminalCapabilities.isManagedRemote(surfaceView),
+                        availableModes: availableModes,
+                        isRemote: PromptTerminalCapabilities.isManagedRemote(surfaceView),
                         hovered: hoveredSurfaceMode,
                         hoverSelect: { candidate in
                             guard hoverSelectionEnabled else { return }
@@ -383,6 +390,10 @@ struct PromptNativeModeBadge: View {
                 selectedSurfaceMode = note.userInfo?[Notification.Name.PromptModeKey] as? PromptSurfaceMode
                     ?? PromptNativeInputRouter.surfaceMode(for: surfaceView)
             }
+            normalizeSelectedMode()
+        }
+        .onReceive(registry.objectWillChange) { _ in
+            DispatchQueue.main.async { normalizeSelectedMode() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .promptShowModePicker)) { note in
             guard note.object as AnyObject? === surfaceView else { return }
@@ -418,11 +429,22 @@ struct PromptNativeModeBadge: View {
             input = nil
             return
         }
+        normalizeSelectedMode()
         input = PromptNativeInputRouter.promptInput(on: surfaceView)
         guard let surface = surfaceView.surface else { return }
         var x = 0.0, y = 0.0, width = 0.0, height = 0.0
         ghostty_surface_ime_point(surface, &x, &y, &width, &height)
         cursorRect = CGRect(x: x, y: y, width: width, height: max(height, surfaceView.cellSize.height))
+    }
+
+    private func normalizeSelectedMode() {
+        let storedMode = PromptNativeInputRouter.surfaceMode(for: surfaceView)
+        let resolvedMode = storedMode.isAvailable(on: surfaceView) ? storedMode : .shell
+        guard selectedSurfaceMode != resolvedMode || storedMode != resolvedMode else { return }
+        selectedSurfaceMode = resolvedMode
+        if storedMode != resolvedMode {
+            PromptNativeInputRouter.selectSurfaceMode(resolvedMode, for: surfaceView)
+        }
     }
 
     private func openSelectorFromHover() {
@@ -467,7 +489,8 @@ struct PromptNativeModeBadge: View {
 
 private struct PromptModePicker: View {
     let selection: PromptSurfaceMode
-    let supportsAgent: Bool
+    let availableModes: Set<PromptSurfaceMode>
+    let isRemote: Bool
     let select: (PromptSurfaceMode) -> Void
 
     private func details(_ mode: PromptSurfaceMode) -> (String, String) {
@@ -483,13 +506,13 @@ private struct PromptModePicker: View {
         VStack(spacing: 2) {
             ForEach(PromptSurfaceMode.allCases, id: \.self) { mode in
                 let detail = details(mode)
-                let available = mode != .agent || supportsAgent
+                let available = availableModes.contains(mode)
                 Button { select(mode) } label: {
                     HStack(spacing: 10) {
                         Image(systemName: detail.0).frame(width: 18)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.rawValue).fontWeight(.semibold)
-                            Text(available ? detail.1 : "Unavailable for remote sessions")
+                            Text(available ? detail.1 : unavailableReason(for: mode))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
@@ -511,11 +534,17 @@ private struct PromptModePicker: View {
         .padding(6)
         .frame(width: 360)
     }
+
+    private func unavailableReason(for mode: PromptSurfaceMode) -> String {
+        if mode == .agent && isRemote { return "Unavailable for remote sessions" }
+        return "No ready provider supplies this capability"
+    }
 }
 
 private struct PromptModePickerPreview: View {
     let selection: PromptSurfaceMode
-    let supportsAgent: Bool
+    let availableModes: Set<PromptSurfaceMode>
+    let isRemote: Bool
     let hovered: PromptSurfaceMode?
     let hoverSelect: (PromptSurfaceMode) -> Void
     let confirm: (PromptSurfaceMode) -> Void
@@ -533,13 +562,13 @@ private struct PromptModePickerPreview: View {
         VStack(spacing: 2) {
             ForEach(PromptSurfaceMode.allCases, id: \.self) { mode in
                 let detail = details(mode)
-                let available = mode != .agent || supportsAgent
+                let available = availableModes.contains(mode)
                 HStack(spacing: 10) {
                     HStack(spacing: 10) {
                         Image(systemName: detail.0).frame(width: 18)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(mode.rawValue).fontWeight(.semibold)
-                            Text(available ? detail.1 : "Unavailable for remote sessions")
+                            Text(available ? detail.1 : unavailableReason(for: mode))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
@@ -567,11 +596,16 @@ private struct PromptModePickerPreview: View {
         .padding(6)
         .frame(width: 360)
     }
+
+    private func unavailableReason(for mode: PromptSurfaceMode) -> String {
+        if mode == .agent && isRemote { return "Unavailable for remote sessions" }
+        return "No ready provider supplies this capability"
+    }
 }
 
 struct PromptNativeAutocompleteOverlay: View {
     @ObservedObject var surfaceView: PromptTerminalSurface
-    @ObservedObject private var autocomplete = PromptAutocompleteModel.shared
+    @ObservedObject private var autocomplete = AutocompleteModel.shared
     @State private var input: String?
     @State private var cursorRect = CGRect(x: 12, y: 12, width: 1, height: 20)
     private let timer = Timer.publish(every: 0.08, on: .main, in: .common).autoconnect()
@@ -623,7 +657,7 @@ struct PromptNativeAutocompleteOverlay: View {
 struct PromptTerminalCommandBar: View {
     @ObservedObject var surfaceView: PromptTerminalSurface
     let presentation: PromptComposerPresentation
-    @ObservedObject private var model = PromptModel.shared
+    @ObservedObject private var model = AIModel.shared
     @State private var text = ""
     @State private var routeOverride: PromptRouteOverride = .automatic
     @State private var isComposerVisible = false
@@ -814,7 +848,7 @@ struct PromptTerminalCommandBar: View {
 }
 
 struct PromptPanelView: View {
-    @EnvironmentObject var model: PromptModel
+    @EnvironmentObject var model: AIModel
     @State private var showThreads = false
     @State private var expanded = false
 
@@ -861,6 +895,8 @@ struct PromptPanelView: View {
                 .help(expanded ? "Hide AI history" : "Show AI history")
             Menu {
                 Text(model.rateLimits)
+                Button("AI Providers…") { AISettingsWindowController.shared.show() }
+                Divider()
                 Button("New thread", action: model.newThread)
                 Button("Fork thread", action: model.forkThread)
                 Button("Resume in terminal", action: model.handoffCLI)

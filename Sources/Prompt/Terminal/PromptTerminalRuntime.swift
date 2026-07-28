@@ -292,7 +292,7 @@ private final class PromptCodexAgentObserver {
                 }
                 if value["method"] != nil {
                     DispatchQueue.main.async { self.onNotification?(value) }
-                } else if let id = CodexAppServer.stringID(value["id"]),
+                } else if let id = CodexRPCClient.stringID(value["id"]),
                           pendingThreadRequestIDs.remove(id) != nil,
                           let result = value["result"] as? [String: Any],
                           let thread = result["thread"] as? [String: Any] {
@@ -321,7 +321,7 @@ private final class PromptCodexAgentObserver {
                 guard let value = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                       let method = value["method"] as? String else { continue }
                 if ["thread/start", "thread/resume", "thread/fork"].contains(method),
-                   let id = CodexAppServer.stringID(value["id"]) {
+                   let id = CodexRPCClient.stringID(value["id"]) {
                     pendingThreadRequestIDs.insert(id)
                 } else if method == "turn/start",
                           let params = value["params"] as? [String: Any],

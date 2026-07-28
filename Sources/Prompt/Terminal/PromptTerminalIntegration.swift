@@ -88,7 +88,7 @@ enum PromptTerminalIntegration {
         guard !PromptTerminalCapabilities.isCompositeAuthority(surface) else { return false }
         PromptNativeInputRouter.observeRemoteKeyDown(event, on: surface)
         if event.keyCode == 0x08, event.modifierFlags.contains(.control) {
-            if PromptModel.shared.cancelTerminalTurn(on: surface) { return true }
+            if AIModel.shared.cancelTerminalTurn(on: surface) { return true }
             if PromptTerminalCapabilities.isManagedRemote(surface) {
                 NotificationCenter.default.post(name: .promptRemoteControlC, object: surface)
             } else if let runtime = (NSApp.delegate as? PromptApplicationDelegate)?.runtime,
@@ -113,7 +113,7 @@ enum PromptTerminalIntegration {
            event.modifierFlags.contains(.shift),
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            !hasMarkedText,
-           PromptAutocompleteModel.shared.cycle(on: surface, direction: event.keyCode == 0x7D ? 1 : -1) { return true }
+           AutocompleteModel.shared.cycle(on: surface, direction: event.keyCode == 0x7D ? 1 : -1) { return true }
         if event.keyCode == 0x30,
            event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
            !hasMarkedText {
@@ -121,7 +121,7 @@ enum PromptTerminalIntegration {
             case .passToTerminal: break
             case .consume: return true
             case .acceptAutocomplete:
-                _ = PromptAutocompleteModel.shared.accept(on: surface)
+                _ = AutocompleteModel.shared.accept(on: surface)
                 return true
             case .switchMode(let mode):
                 PromptNativeInputRouter.selectSurfaceModeFromKeyboard(mode, for: surface)

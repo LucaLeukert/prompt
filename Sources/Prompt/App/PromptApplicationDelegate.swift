@@ -89,6 +89,11 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
         _ = workspaceStore.inputRouter.dispatch(.actions)
     }
     @objc func showAIComposer(_ sender: Any?) { PromptController.shared.toggle() }
+    #if DEBUG
+        @objc func showAIDiagnostics(_ sender: Any?) {
+            AIDiagnosticsWindowController.shared.show()
+        }
+    #endif
     @objc func focusSessionFromMenu(_ sender: Any?) {
         guard let item = sender as? NSMenuItem else { return }
         workspaceStore.focusSidebarSession(at: item.tag)
@@ -232,6 +237,18 @@ final class PromptApplicationDelegate: NSObject, NSApplicationDelegate {
         view.addItem(item("Split Down", #selector(splitDown(_:)), "d", [.command, .shift]))
         viewRoot.submenu = view
         main.addItem(viewRoot)
+
+        #if DEBUG
+            let debugRoot = NSMenuItem()
+            let debug = NSMenu(title: "Debug")
+            debug.addItem(item(
+                "AI Diagnostics…",
+                #selector(showAIDiagnostics(_:)),
+                "i",
+                [.command, .option]))
+            debugRoot.submenu = debug
+            main.addItem(debugRoot)
+        #endif
 
         let sessionRoot = NSMenuItem()
         let session = NSMenu(title: "Session")
