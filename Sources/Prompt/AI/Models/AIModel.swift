@@ -63,6 +63,7 @@ final class AIModel: ObservableObject {
     private var activeRequestText = ""
     private var externalRequestID: UUID?
     private weak var externalProvider: (any ConversationProviding)?
+    private var activeConversation: AIConversation?
     private var isConnecting = false
     private var connectionWaiters: [(Result<Void, Error>) -> Void] = []
     private final class PendingTerminalRun {
@@ -107,6 +108,17 @@ final class AIModel: ObservableObject {
         status = "Checking ChatGPT sign-in…"
         CodexProvider.shared.start(cwd: projectRoot)
         models = [DefaultAIModels.codex]
+        server.start { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                connected = true
+                refresh()
+            case .failure:
+                connected = false
+            }
+        }
+        restoreConversations()
         completion?(.success(()))
     }
 
@@ -117,12 +129,23 @@ final class AIModel: ObservableObject {
             status = message
         }
         models = [DefaultAIModels.codex]
-        threads = []
-        activeThreadID = nil
+        restoreConversations()
         rateLimits = "Unavailable without app-server"
     }
 
     func select(_ thread: PromptThread) {
+        if let conversation = ConversationStore.shared.load(id: UUID(uuidString: thread.id) ?? UUID()) {
+            activeConversation = conversation
+            activeThreadID = thread.id
+            CapabilityRouter.shared.set(
+                providerID: conversation.providerID,
+                modelID: conversation.modelID,
+                for: conversation.capability)
+            messages = conversation.messages.map(Self.promptMessage)
+            status = "Restored \(conversation.title)"
+            return
+        }
+        activeConversation = nil
         activeThreadID = thread.id
         status = "Resuming \(thread.title)"
         server.request("thread/resume", params: [
@@ -141,6 +164,7 @@ final class AIModel: ObservableObject {
     }
 
     func newThread() {
+        activeConversation = nil
         activeThreadID = nil
         messages = []
         status = "New Prompt conversation"
@@ -247,6 +271,14 @@ final class AIModel: ObservableObject {
             // independently on the same surface.
             if remote == nil || surface.isComposite { PromptController.pressReturn(on: surface) }
             messages.append(.init(kind: .user, text: value))
+            if lane == .agent, selectedProvider.descriptor.id == .codex {
+                guard connected else {
+                    failTerminalTurn("Codex app-server is not connected yet.")
+                    return true
+                }
+                createTerminalThreadThenSend(value)
+                return true
+            }
             if selectedProvider is any ConversationProviding {
                 startExternalTurn(value, lane: lane)
                 return true
@@ -316,6 +348,8 @@ final class AIModel: ObservableObject {
         messages.append(message)
         streamingMessageID = message.id
         externalProvider = provider
+        ensureActiveConversation(for: capability, route: route, title: text)
+        persistActiveConversation()
         let previousConversation = messages.dropLast().compactMap { message -> String? in
             switch message.kind {
             case .user: "User: \(message.text)"
@@ -351,6 +385,7 @@ final class AIModel: ObservableObject {
                let index = messages.firstIndex(where: { $0.id == id }) {
                 messages[index].text += delta
             }
+            persistActiveConversation()
             if let surface = terminalResponseSurface, let blockID = terminalRichBlockID {
                 PromptRichContentStore.shared.enqueue(delta, to: blockID, on: surface)
             }
@@ -361,6 +396,7 @@ final class AIModel: ObservableObject {
             externalProvider = nil
             finishTerminalStream()
             streamingMessageID = nil
+            persistActiveConversation()
         case .failed(let message):
             externalRequestID = nil
             externalProvider = nil
@@ -527,6 +563,66 @@ final class AIModel: ObservableObject {
         terminalResponseCWD = nil
         declinePendingTerminalRuns(reason: text)
         activeTurnID = nil
+        persistActiveConversation()
+    }
+
+    private func restoreConversations() {
+        let conversations = ConversationStore.shared.list()
+        threads = conversations.map {
+            .init(
+                id: $0.id.uuidString,
+                title: $0.title,
+                cwd: $0.projectRoot ?? "",
+                updatedAt: ISO8601DateFormatter().string(from: $0.updatedAt))
+        }
+        guard activeConversation == nil, let conversation = conversations.first else { return }
+        activeConversation = conversation
+        activeThreadID = conversation.id.uuidString
+        messages = conversation.messages.map(Self.promptMessage)
+    }
+
+    private func ensureActiveConversation(
+        for capability: AICapability,
+        route: CapabilityRoute,
+        title: String
+    ) {
+        guard activeConversation?.capability != capability
+            || activeConversation?.providerID != route.providerID
+            || activeConversation?.modelID != route.modelID else { return }
+        activeConversation = .init(
+            capability: capability,
+            providerID: route.providerID,
+            modelID: route.modelID,
+            title: String(title.prefix(80)),
+            projectRoot: projectRoot)
+        activeThreadID = activeConversation?.id.uuidString
+    }
+
+    private func persistActiveConversation() {
+        guard var conversation = activeConversation else { return }
+        conversation.updatedAt = Date()
+        conversation.messages = messages.compactMap { message in
+            let role: ConversationMessage.Role = switch message.kind {
+            case .user: .user
+            case .assistant: .assistant
+            case .activity: .activity
+            case .error: .error
+            }
+            return .init(role: role, text: message.text)
+        }
+        activeConversation = conversation
+        _ = ConversationStore.shared.save(conversation)
+        restoreConversations()
+    }
+
+    private static func promptMessage(_ message: ConversationMessage) -> PromptMessage {
+        let kind: PromptMessage.Kind = switch message.role {
+        case .user: .user
+        case .assistant: .assistant
+        case .activity: .activity
+        case .error: .error
+        }
+        return .init(kind: kind, text: message.text)
     }
 
     func captureTerminal() {
