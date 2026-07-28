@@ -335,7 +335,10 @@ final class AIModel: ObservableObject {
                     String($0.cachedVisibleContents.get().suffix(12_000))
                 } ?? terminalContext,
                 conversationContext: previousConversation,
-                allowsWorkspaceWrites: lane == .agent),
+                // Direct provider turns have no native PromptApproval bridge.
+                // Agent-mode mutations must stay behind the app-server
+                // terminal_run flow, which creates an approval for each command.
+                allowsWorkspaceWrites: false),
             onEvent: { [weak self] event in
                 self?.handleExternal(event)
             })
