@@ -78,13 +78,13 @@ final class AmbientAnalyzer {
     }
 
     private func completeAnalysis() {
-            if let recommendation = PromptAmbientAnalysisResult.parse(response),
-               let surface = active?.surface,
-               PromptTerminalEnvironment.allowsRichContent(on: surface),
-               PromptNativeInputRouter.promptInput(on: surface)?.isEmpty == true {
-                PromptRichContentStore.shared.presentRecommendation(recommendation, on: surface)
-            }
-            finish()
+        if let recommendation = PromptAmbientAnalysisResult.parse(response),
+           let surface = active?.surface,
+           PromptTerminalEnvironment.allowsRichContent(on: surface),
+           PromptNativeInputRouter.promptInput(on: surface)?.isEmpty == true {
+            PromptRichContentStore.shared.presentRecommendation(recommendation, on: surface)
+        }
+        finish()
     }
 
     private func finish() {

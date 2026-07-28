@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 #if DEBUG
-import SwiftUI
+    import SwiftUI
 #endif
 
 @MainActor
@@ -186,10 +186,10 @@ final class CodexProvider: ConversationProviding {
 }
 
 #if DEBUG
-extension CodexProvider: AIDebugPageProviding {
-    var debugPageTitle: String { "ChatGPT (Codex)" }
-    func makeDebugPage() -> AnyView {
-        AnyView(CodexDebugPage())
+    extension CodexProvider: AIDebugPageProviding {
+        var debugPageTitle: String { "ChatGPT (Codex)" }
+        func makeDebugPage() -> AnyView {
+            AnyView(CodexDebugPage())
+        }
     }
-}
 #endif

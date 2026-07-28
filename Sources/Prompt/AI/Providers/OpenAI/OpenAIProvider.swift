@@ -1,7 +1,7 @@
 import Foundation
 import OpenAI
 #if DEBUG
-import SwiftUI
+    import SwiftUI
 #endif
 
 /// The direct OpenAI API provider has a separate identity and credential
@@ -92,10 +92,10 @@ final class OpenAIProvider: ConversationProviding {
 }
 
 #if DEBUG
-extension OpenAIProvider: AIDebugPageProviding {
-    var debugPageTitle: String { "OpenAI API" }
-    func makeDebugPage() -> AnyView {
-        AnyView(OpenAIDebugPage())
+    extension OpenAIProvider: AIDebugPageProviding {
+        var debugPageTitle: String { "OpenAI API" }
+        func makeDebugPage() -> AnyView {
+            AnyView(OpenAIDebugPage())
+        }
     }
-}
 #endif

@@ -1,6 +1,6 @@
 import Foundation
 #if DEBUG
-import SwiftUI
+    import SwiftUI
 #endif
 
 @MainActor
@@ -223,8 +223,8 @@ final class CopilotProvider: AutocompleteProviding, ConversationProviding {
 }
 
 #if DEBUG
-extension CopilotProvider: AIDebugPageProviding {
-    var debugPageTitle: String { "GitHub Copilot" }
-    func makeDebugPage() -> AnyView { AnyView(CopilotDebugPage()) }
-}
+    extension CopilotProvider: AIDebugPageProviding {
+        var debugPageTitle: String { "GitHub Copilot" }
+        func makeDebugPage() -> AnyView { AnyView(CopilotDebugPage()) }
+    }
 #endif

@@ -355,18 +355,18 @@ private struct PromptInlineRichBlockFrame: View {
         richContent
             .frame(width: width)
             .frame(height: height, alignment: .top)
-        .frame(width: width, height: height, alignment: .top)
-        // These rows belong to host-rendered terminal history. Let their
-        // selectable text receive mouse gestures instead of passing drags
-        // through to Ghostty's intentionally blank backing cells.
-        .contentShape(Rectangle())
-        .allowsHitTesting(true)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                    guard let terminal = surfaceView.surface else { return }
-                    _ = ghostty_surface_clear_selection(terminal)
-                })
+            .frame(width: width, height: height, alignment: .top)
+            // These rows belong to host-rendered terminal history. Let their
+            // selectable text receive mouse gestures instead of passing drags
+            // through to Ghostty's intentionally blank backing cells.
+            .contentShape(Rectangle())
+            .allowsHitTesting(true)
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard let terminal = surfaceView.surface else { return }
+                        _ = ghostty_surface_clear_selection(terminal)
+                    })
     }
 
     @ViewBuilder
@@ -805,7 +805,7 @@ private struct PromptRichDocument: View {
                 let scale = max(1.0, 1.65 - CGFloat(hashes - 1) * 0.13)
                 return result
                     + Text(inlineMarkdown(title))
-                        .font(.custom(PromptTypography.mono, size: fontSize * scale).weight(.bold))
+                    .font(.custom(PromptTypography.mono, size: fontSize * scale).weight(.bold))
                     + separator
             }
             return result + Text(inlineMarkdown(line)) + separator
