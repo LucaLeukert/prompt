@@ -130,6 +130,15 @@ final class AIModel: ObservableObject {
         }
         models = [DefaultAIModels.codex]
         restoreConversations()
+        guard connected else { return }
+        server.request("thread/list", params: [
+            "limit": 50,
+            "sortKey": "updated_at",
+            "sortDirection": "desc",
+            "cwd": projectRoot,
+        ]) { [weak self] result in
+            self?.loadThreads(result)
+        }
         rateLimits = "Unavailable without app-server"
     }
 
@@ -568,17 +577,22 @@ final class AIModel: ObservableObject {
 
     private func restoreConversations() {
         let conversations = ConversationStore.shared.list()
-        threads = conversations.map {
-            .init(
-                id: $0.id.uuidString,
-                title: $0.title,
-                cwd: $0.projectRoot ?? "",
-                updatedAt: ISO8601DateFormatter().string(from: $0.updatedAt))
-        }
+        threads = storedThreads(conversations)
         guard activeConversation == nil, let conversation = conversations.first else { return }
         activeConversation = conversation
         activeThreadID = conversation.id.uuidString
         messages = conversation.messages.map(Self.promptMessage)
+    }
+
+    private func storedThreads(_ conversations: [AIConversation] = ConversationStore.shared.list()) -> [PromptThread] {
+        let formatter = ISO8601DateFormatter()
+        return conversations.map {
+            .init(
+                id: $0.id.uuidString,
+                title: $0.title,
+                cwd: $0.projectRoot ?? "",
+                updatedAt: formatter.string(from: $0.updatedAt))
+        }
     }
 
     private func ensureActiveConversation(
@@ -757,13 +771,17 @@ final class AIModel: ObservableObject {
     private func loadThreads(_ result: Result<[String: Any], Error>) {
         guard let value = try? result.get() else { return }
         let data = value["data"] as? [[String: Any]] ?? []
-        threads = data.compactMap { raw in
+        let appServerThreads: [PromptThread] = data.compactMap { raw in
             guard let id = raw["id"] as? String else { return nil }
             return PromptThread(
                 id: id,
                 title: (raw["name"] as? String) ?? (raw["preview"] as? String)?.components(separatedBy: .newlines).first ?? "Codex thread",
                 cwd: raw["cwd"] as? String ?? "",
                 updatedAt: String(describing: raw["updatedAt"] ?? raw["createdAt"] ?? ""))
+        }
+        let stored = storedThreads()
+        threads = (stored + appServerThreads).reduce(into: []) { result, thread in
+            if !result.contains(where: { $0.id == thread.id }) { result.append(thread) }
         }
     }
 
