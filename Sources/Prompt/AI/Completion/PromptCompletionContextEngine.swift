@@ -25,6 +25,7 @@ private struct PromptShellCursor {
         var quote: Quote = .none
         var escaped = false
         let characters = Array(input)
+        let startsNewToken = characters.last?.isWhitespace == true
         var index = 0
 
         func flush() {
@@ -77,15 +78,20 @@ private struct PromptShellCursor {
                 segment.append(lexeme)
             }
         }
-        let redirect = segment.count > 1 && {
-            if case .redirect = segment[segment.count - 2] { return true }
-            return false
+        let redirect = {
+            if startsNewToken, let last = segment.last, case .redirect = last { return true }
+            guard segment.count > 1, case .redirect = segment[segment.count - 2] else { return false }
+            return true
         }()
         var words = segment.compactMap { lexeme -> String? in
             if case let .word(value) = lexeme { return value }
             return nil
         }
-        let active = words.last ?? ""
+        // Whitespace after a word moves the shell cursor to a new, empty
+        // argument. Treating the previous word as active turned `git ` into a
+        // command-name completion and generated invalid candidates like
+        // `ggit`, which Copilot correctly discarded.
+        let active = startsNewToken ? "" : (words.last ?? "")
 
         while let first = words.first, assignment(first) { words.removeFirst() }
         while let first = words.first, ["command", "builtin", "exec", "nohup", "time"].contains(first) {
@@ -106,9 +112,9 @@ private struct PromptShellCursor {
             command: command,
             arguments: arguments,
             token: active,
-            commandPosition: command == nil || (words.count == 1 && active == command),
+            commandPosition: command == nil || (!startsNewToken && words.count == 1 && active == command),
             redirectionTarget: redirect,
-            argumentIndex: max(0, arguments.count - 1),
+            argumentIndex: startsNewToken ? arguments.count : max(0, arguments.count - 1),
             quote: quote,
             previousOperator: previousOperator)
     }
@@ -233,7 +239,16 @@ enum PromptCompletionContextEngine {
 
     static func build(prefix: String, cwd: String, terminal: String) -> PromptCompletionContext {
         let fileManager = FileManager.default
-        let input = prefix.trimmingCharacters(in: .whitespaces)
+        // Trailing whitespace is semantic shell input: `git` is a command
+        // token, while `git ` asks for its first argument. Removing it made
+        // Copilot complete the wrong cursor role.
+        let trimmedInput = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailingWhitespaceCount = prefix.reversed().prefix {
+            $0 == " " || $0 == "\t"
+        }.count
+        // Several trailing cells are terminal-capture padding, while one
+        // trailing space is real shell syntax.
+        let input = trimmedInput + (trailingWhitespaceCount == 1 ? " " : "")
         let cursor = PromptShellCursor.parse(input)
         let command = cursor.command?.lowercased()
         let paths = pathCandidates(cursor: cursor, command: command, cwd: cwd, fileManager: fileManager)
@@ -289,7 +304,11 @@ enum PromptCompletionContextEngine {
             lines.append("# Current command:")
         }
         let commandLine = lines.count
-        let target = suffixOnly ? "# " : input
+        // Copilot is an editor completion engine, not a prompt endpoint. Keep
+        // the cursor on the actual command; placing it on an instructional
+        // comment causes the server to discard otherwise successful model
+        // generations during post-processing.
+        let target = input
         lines.append(target)
         return .init(
             document: lines.joined(separator: "\n"),

@@ -7,8 +7,8 @@ import SwiftMath
 import SwiftUI
 
 @MainActor
-final class PromptAutocompleteModel: ObservableObject {
-    static let shared = PromptAutocompleteModel()
+final class AutocompleteModel: ObservableObject {
+    static let shared = AutocompleteModel()
     private static let completeAIInputSettingKey = "PromptCopilotCompletesAIInput"
 
     @Published private var suggestions: [ObjectIdentifier: [String]] = [:]
@@ -16,7 +16,6 @@ final class PromptAutocompleteModel: ObservableObject {
     @Published var completesAIInput: Bool {
         didSet { PromptSettings.shared.set(completesAIInput, forKey: Self.completeAIInputSettingKey) }
     }
-    private let copilot = PromptCopilotCompletionServer()
     private var startupCWD = FileManager.default.homeDirectoryForCurrentUser.path
     private var activeSurfaceID: ObjectIdentifier?
     private weak var activeSurface: PromptTerminalSurface?
@@ -26,33 +25,31 @@ final class PromptAutocompleteModel: ObservableObject {
 
     private init() {
         completesAIInput = PromptSettings.shared.value(forKey: Self.completeAIInputSettingKey) ?? false
-        copilot.onStatus = { status in
-            #if DEBUG
-                PromptAIDebug.emit("Copilot Completion", "status", status)
-            #endif
-        }
     }
 
     func start(cwd: String) {
         startupCWD = cwd
-        copilot.start(cwd: cwd)
     }
 
     func observe(prefix: String, on surface: PromptTerminalSurface) {
         let id = ObjectIdentifier(surface)
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        // This view is polled roughly every frame. Do not inspect the shell
+        // environment or launch a classifier process when nothing changed:
+        // doing so can repeatedly ask macOS for removable-volume access when
+        // the active terminal happens to be on an external disk.
+        if activeSurfaceID == id, activePrefix == prefix { return }
         let classification = PromptTerminalEnvironment.shellClassificationContext(on: surface)
         guard PromptTerminalEnvironment.allowsRichContent(on: surface),
               Self.shouldComplete(
                   prefix: prefix,
                   completesAIInput: completesAIInput,
                   shell: classification.shell,
-                  cwd: classification.cwd),
+                  cwd: nil),
               trimmed.count >= 2 else {
             clear(on: surface)
             return
         }
-        if activeSurfaceID == id, activePrefix == prefix { return }
         generation += 1
         let requestGeneration = generation
         pending?.cancel()
@@ -110,7 +107,10 @@ final class PromptAutocompleteModel: ObservableObject {
             guard let terminal = surface?.surface else { return }
             _ = ghostty_surface_clear_selection(terminal)
         }
-        copilot.accept(index: selectedIndices[id] ?? 0)
+        let index = selectedIndices[id] ?? 0
+        if let provider = autocompleteProvider() {
+            provider.accepted(.init(text: suffix, providerIndex: index))
+        }
         clear(on: surface)
         return true
     }
@@ -130,14 +130,48 @@ final class PromptAutocompleteModel: ObservableObject {
 
     private func request(prefix: String, on surface: PromptTerminalSurface, generation requestGeneration: Int) {
         let cwd = surface.pwd ?? (startupCWD == "/" ? FileManager.default.homeDirectoryForCurrentUser.path : startupCWD)
-        let terminal = String(surface.cachedVisibleContents.get().suffix(8_000))
-        let completionPrefix = prefix.trimmingCharacters(in: .whitespaces)
-        copilot.complete(prefix: completionPrefix, cwd: cwd, terminal: terminal) { [weak self, weak surface] values in
+        // Copilot's public LSP accepts editor text but has no separate context
+        // field. Real command history works reliably as shell comments, while
+        // synthesized inventories can cause its post-processor to return no
+        // items. Include the live viewport plus bounded completed command
+        // blocks from this terminal so earlier workflow context survives
+        // scrolling.
+        var terminalParts = PromptBlockStore.shared.recent(limit: 6, on: surface)
+            .reversed()
+            .map { block in
+                [
+                    "$ \(block.command)",
+                    String(block.snapshot.suffix(4_000)),
+                    "[exit \(block.exitCode) in \(block.cwd)]",
+                ].joined(separator: "\n")
+            }
+        terminalParts.append(String(surface.cachedVisibleContents.get().suffix(16_000)))
+        let terminal = String(terminalParts.joined(separator: "\n").suffix(32_000))
+        let trimmedPrefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailingWhitespaceCount = prefix.reversed().prefix {
+            $0 == " " || $0 == "\t"
+        }.count
+        let completionPrefix = trimmedPrefix + (trailingWhitespaceCount == 1 ? " " : "")
+        guard let provider = autocompleteProvider() else {
+            clear(on: surface)
+            return
+        }
+        provider.start(cwd: cwd)
+        provider.complete(.init(
+            prefix: completionPrefix,
+            cwd: cwd,
+            terminal: terminal
+        )) { [weak self, weak surface] result in
             guard let self, let surface, generation == requestGeneration,
                   activeSurfaceID == ObjectIdentifier(surface), activePrefix == prefix else { return }
+            let values = (try? result.get())?.map(\.text) ?? []
             suggestions[ObjectIdentifier(surface)] = values
             selectedIndices[ObjectIdentifier(surface)] = 0
         }
+    }
+
+    private func autocompleteProvider() -> (any AutocompleteProviding)? {
+        CapabilityRouter.shared.provider(for: .autocomplete) as? any AutocompleteProviding
     }
 
     nonisolated static func clean(

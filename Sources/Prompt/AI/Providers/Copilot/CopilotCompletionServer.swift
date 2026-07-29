@@ -6,7 +6,7 @@ import MarkdownUI
 import SwiftMath
 import SwiftUI
 
-final class PromptCopilotCompletionServer {
+final class CopilotCompletionServer {
     var onStatus: ((String) -> Void)?
     private var process: Process?
     private var input: FileHandle?
@@ -16,7 +16,8 @@ final class PromptCopilotCompletionServer {
     private let queue = DispatchQueue(label: "dev.prompt.copilot-lsp")
     private var initialized = false
     private var starting = false
-    private var workspace = FileManager.default.homeDirectoryForCurrentUser.path
+    private var workspace = PromptPaths().providerDirectory(.copilot)
+        .appendingPathComponent("workspace", isDirectory: true).path
     private var documentURI = ""
     private var documentVersion = 0
     private var pendingCompletion: (prefix: String, cwd: String, terminal: String, completion: ([String]) -> Void)?
@@ -26,8 +27,10 @@ final class PromptCopilotCompletionServer {
     private var retryAfter = Date.distantPast
 
     func start(cwd: String) {
-        workspace = cwd == "/" ? FileManager.default.homeDirectoryForCurrentUser.path : cwd
         guard process == nil, !starting, Date() >= retryAfter else { return }
+        try? FileManager.default.createDirectory(
+            atPath: workspace,
+            withIntermediateDirectories: true)
         starting = true
         onStatus?("Starting GitHub Copilot Language Server")
         #if DEBUG
@@ -92,6 +95,7 @@ final class PromptCopilotCompletionServer {
                 self?.initialized = false
                 self?.starting = false
                 self?.callbacks.removeAll()
+                self?.resetDocuments()
                 if process.terminationStatus != 0 {
                     self?.consecutiveLaunchFailures += 1
                     let failures = self?.consecutiveLaunchFailures ?? 1
@@ -117,6 +121,16 @@ final class PromptCopilotCompletionServer {
                 PromptAIDebug.emit("Copilot Completion", "error", "launch failed: \(error.localizedDescription)")
             #endif
         }
+    }
+
+    func stop() {
+        input?.closeFile()
+        process?.terminate()
+        process = nil
+        input = nil
+        callbacks.removeAll()
+        pendingCompletion = nil
+        resetDocuments()
     }
 
     func complete(prefix: String, cwd: String, terminal: String, completion: @escaping ([String]) -> Void) {
@@ -170,20 +184,28 @@ final class PromptCopilotCompletionServer {
     }
 
     private func requestCompletion(prefix: String, cwd: String, terminal: String, completion: @escaping ([String]) -> Void) {
-        if workspace != cwd {
-            let oldURI = URL(fileURLWithPath: workspace, isDirectory: true).absoluteString
-            let newURL = URL(fileURLWithPath: cwd, isDirectory: true)
-            notify("workspace/didChangeWorkspaceFolders", params: ["event": [
-                "removed": [["uri": oldURI, "name": URL(fileURLWithPath: workspace).lastPathComponent]],
-                "added": [["uri": newURL.absoluteString, "name": newURL.lastPathComponent]],
-            ]])
-            workspace = cwd
-        }
-        let uri = URL(fileURLWithPath: cwd, isDirectory: true)
-            .appendingPathComponent(".prompt-terminal.sh").absoluteString
-        let context = PromptCompletionContextEngine.build(prefix: prefix, cwd: cwd, terminal: terminal)
-        let document = context.document
-        let commandLine = context.commandLine
+        // Keep this as a non-file document. A synthetic filename such as
+        // `.prompt-terminal.sh` becomes completion context and Copilot may
+        // suggest typing that internal filename. Using the real terminal path
+        // can also make provider indexing touch protected volumes.
+        let uri = Self.completionDocumentURI
+        // Copilot's language server expects ordinary editor content. A large
+        // instruction-style pseudo-prompt reaches the model but its LSP
+        // post-processor rejects the generated solution. Keep only compact,
+        // code-shaped context and put the cursor on the real command.
+        let completionDocument = Self.completionDocument(
+            prefix: prefix,
+            cwd: cwd,
+            terminal: terminal)
+        let document = completionDocument.text
+        let commandLine = completionDocument.line
+        let cursorCharacter = completionDocument.character
+        #if DEBUG
+            PromptAIDebug.emit(
+                "Copilot Completion",
+                "autocomplete request",
+                "prefix=\(String(prefix.prefix(500))) · cwd=\(cwd) · documentVersion=\(documentVersion + 1) · line=\(commandLine) · character=\(cursorCharacter)")
+        #endif
         documentVersion += 1
         if documentURI != uri {
             if !documentURI.isEmpty { notify("textDocument/didClose", params: ["textDocument": ["uri": documentURI]]) }
@@ -198,14 +220,21 @@ final class PromptCopilotCompletionServer {
                 "contentChanges": [["text": document]],
             ])
         }
+        notify("textDocument/didFocus", params: ["textDocument": ["uri": uri]])
         let requestPrefix = prefix
         request("textDocument/inlineCompletion", params: [
             "textDocument": ["uri": uri, "version": documentVersion],
-            "position": ["line": commandLine, "character": context.cursorCharacter],
+            "position": ["line": commandLine, "character": cursorCharacter],
             "context": ["triggerKind": 2],
             "formattingOptions": ["tabSize": 4, "insertSpaces": true],
         ]) { [weak self] result in
             guard let self, pendingCompletion?.prefix == requestPrefix else { return }
+            #if DEBUG
+                PromptAIDebug.emit(
+                    "Copilot Completion",
+                    "raw inline response",
+                    Self.debugDescription(result))
+            #endif
             let items: [[String: Any]]
             if let object = result as? [String: Any] {
                 items = object["items"] as? [[String: Any]] ?? []
@@ -215,11 +244,12 @@ final class PromptCopilotCompletionServer {
             let values = items.compactMap { item -> String? in
                 let edit = item["textEdit"] as? [String: Any]
                 guard let text = item["insertText"] as? String ?? edit?["newText"] as? String else { return nil }
-                let suffix = PromptAutocompleteModel.clean(
+                let suffix = AutocompleteModel.clean(
                     text,
                     prefix: requestPrefix,
-                    expectsSuffixOnly: context.expectsSuffixOnly)
-                return suffix.isEmpty ? nil : suffix
+                    expectsSuffixOnly: false)
+                return suffix.isEmpty || Self.isInternalArtifactCompletion(text)
+                    ? nil : suffix
             }
             completionItems = items
             if let item = items.first {
@@ -230,7 +260,10 @@ final class PromptCopilotCompletionServer {
                     ? "array"
                     : "object[\(((result as? [String: Any])?.keys.sorted().joined(separator: ",")) ?? "")]"
                 PromptAIDebug.emit("Copilot Completion", "completion", "\(values.count) suggestion(s) · \(shape) · \(items.first?.keys.sorted().joined(separator: ",") ?? "no item") · input: \(String(requestPrefix.prefix(300)))")
-                PromptAIDebug.emit("Copilot Completion", "context", "\(context.pathCandidates.count) path(s), \(context.executableCandidates.count) executable(s) · \(String(document.prefix(4_000)))")
+                PromptAIDebug.emit(
+                    "Copilot Completion",
+                    "target document",
+                    String(document.prefix(4_000)))
             #endif
             guard !values.isEmpty else {
                 self.requestPanelCompletion(
@@ -238,8 +271,8 @@ final class PromptCopilotCompletionServer {
                     uri: uri,
                     version: self.documentVersion,
                     line: commandLine,
-                    character: context.cursorCharacter,
-                    expectsSuffixOnly: context.expectsSuffixOnly,
+                    character: cursorCharacter,
+                    expectsSuffixOnly: false,
                     completion: completion)
                 return
             }
@@ -281,11 +314,13 @@ final class PromptCopilotCompletionServer {
         let values = items.compactMap { item -> String? in
             let edit = item["textEdit"] as? [String: Any]
             guard let text = item["insertText"] as? String ?? edit?["newText"] as? String else { return nil }
-            let suffix = PromptAutocompleteModel.clean(
+            let suffix = AutocompleteModel.clean(
                 text,
                 prefix: prefix,
                 expectsSuffixOnly: expectsSuffixOnly)
-            guard !suffix.isEmpty, seen.insert(suffix).inserted else { return nil }
+            guard !suffix.isEmpty,
+                  !Self.isInternalArtifactCompletion(text),
+                  seen.insert(suffix).inserted else { return nil }
             return suffix
         }
         #if DEBUG
@@ -304,6 +339,64 @@ final class PromptCopilotCompletionServer {
         if let value = object["value"] { return completionItems(from: value) }
         return []
     }
+
+    static let completionDocumentURI = "untitled:terminal-session"
+
+    static func isInternalArtifactCompletion(_ value: String) -> Bool {
+        let normalized = value.lowercased()
+        return normalized.contains("prompt-terminal")
+            || normalized.contains("terminal-session")
+    }
+
+    static func completionDocument(
+        prefix: String,
+        cwd: String,
+        terminal: String
+    ) -> (text: String, line: Int, character: Int) {
+        var lines = [
+            "#!/bin/zsh",
+            "# Terminal directory: \(cwd.replacingOccurrences(of: "\n", with: " "))",
+        ]
+        // The completion core used by VS Code gives recent edits almost the
+        // same weight as the current file. The public LSP has no equivalent
+        // context RPC, so retain a bounded recent terminal prefix as ordinary
+        // shell comments in the active document.
+        let recentTerminal = String(terminal.suffix(32_000))
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .suffix(200)
+        if !recentTerminal.isEmpty {
+            lines.append("# Recent terminal context:")
+            lines.append(contentsOf: recentTerminal.map {
+                "# \($0.replacingOccurrences(of: "\r", with: ""))"
+            })
+        }
+        let line = lines.count
+        lines.append(prefix)
+        return (
+            text: lines.joined(separator: "\n"),
+            line: line,
+            character: prefix.utf16.count)
+    }
+
+    private func resetDocuments() {
+        documentURI = ""
+        documentVersion = 0
+        completionItems = []
+    }
+
+    #if DEBUG
+        private static func debugDescription(_ value: Any?) -> String {
+            guard let value else { return "nil" }
+            if JSONSerialization.isValidJSONObject(value),
+               let data = try? JSONSerialization.data(
+                   withJSONObject: value,
+                   options: [.sortedKeys]),
+               let text = String(data: data, encoding: .utf8) {
+                return String(text.prefix(8_000))
+            }
+            return String(String(describing: value).prefix(8_000))
+        }
+    #endif
 
     private func request(_ method: String, params: [String: Any], completion: @escaping (Any?) -> Void) {
         let id = nextID

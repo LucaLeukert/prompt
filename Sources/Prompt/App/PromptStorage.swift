@@ -15,6 +15,14 @@ struct PromptPaths {
 
     var settings: URL { configurationFile("config.json") }
     var cache: URL { root.appendingPathComponent("cache", isDirectory: true) }
+    var providers: URL { root.appendingPathComponent("providers", isDirectory: true) }
+    var conversations: URL {
+        root.appendingPathComponent("ai/conversations", isDirectory: true)
+    }
+
+    func providerDirectory(_ id: AIProviderID) -> URL {
+        providers.appendingPathComponent(id.rawValue, isDirectory: true)
+    }
 
     func configurationFile(_ name: String) -> URL {
         root.appendingPathComponent(name, isDirectory: false)
@@ -27,6 +35,7 @@ struct PromptPaths {
     func prepare(fileManager: FileManager = .default) throws {
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: cache, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: providers, withIntermediateDirectories: true)
     }
 }
 

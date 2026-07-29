@@ -104,9 +104,23 @@ output and persistence rather than owning Prompt's visible layout.
 
 ### AI and context
 
-`CodexAppServer` starts the locally installed `codex app-server` process and
-speaks its JSONL protocol. `PromptModel` owns interactive AI state, threads,
-models, streaming events, approvals, and handoff actions.
+AI features resolve through `AIProviderRegistry` and `CapabilityRouter`.
+Assistant, Agent, and Autocomplete each persist an independent provider and
+model route. Providers advertise only the capabilities they actually implement,
+and feature code consumes capability protocols rather than concrete transports.
+
+The built-in providers are OpenAI API, ChatGPT/Codex, and GitHub Copilot.
+`CodexRPCClient` starts the locally installed `codex app-server` process and
+speaks its JSONL protocol behind `CodexProvider`. It runs with an isolated
+Prompt-owned `CODEX_HOME`, so Prompt conversations do not enter the Codex
+desktop app's conversation inventory. `CopilotProvider` uses the Copilot
+language server for autocomplete and the installed Copilot CLI for Assistant.
+`OpenAIProvider` uses MacPaw/OpenAI and a Keychain-stored API key.
+
+`AIModel` coordinates the existing presentation state while requests are
+dispatched through the selected capability provider. Provider-neutral
+conversation values are persisted by `ConversationStore`; opaque native session
+identifiers remain bound to their originating provider.
 
 `PromptBuilder` is the single prompt-assembly point. `PromptContextEngine` and
 `PromptBlockStore` expose bounded, recent terminal evidence that Codex cannot
@@ -114,16 +128,22 @@ recover by inspecting the project itself. Project files and Git state are not
 copied wholesale into prompts; the Codex agent uses its own tools to inspect
 them when needed.
 
+Rich assistant responses use Ghostty host-content reservations. Ghostty
+allocates the rows, moves the cursor, and keeps those rows in its authoritative
+scrollback; Prompt renders Markdown, math, tools, and approvals into the
+corresponding visible row range. Prompt must not inject private cursor movement
+or insert-line escape sequences to create rich-content space.
+
 Terminal evidence is explicitly described as untrusted. This is a prompt and
 data-flow boundary, not a sandbox: AI-requested commands and file changes must
 still be reviewed at the approval surface.
 
-`PromptAmbientAnalyzer` uses a separate app-server interaction for silent
+`AmbientAnalyzer` uses a separate app-server interaction for silent
 post-command analysis. It renders a result only when the model identifies a
 specific useful follow-up.
 
 Inline shell completion is separate from interactive Codex turns.
-`PromptCopilotCompletionServer` is a minimal client for GitHub's official
+`CopilotCompletionServer` is a minimal client for GitHub's official
 Copilot language server and uses its inline-completion method.
 
 ## Ghostty integration

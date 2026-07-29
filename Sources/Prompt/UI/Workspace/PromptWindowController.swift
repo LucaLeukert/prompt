@@ -385,7 +385,7 @@ private struct PromptSidebarSessionRow: View {
     @ObservedObject var store: PromptWorkspaceStore
     @ObservedObject private var runtime: PromptTerminalRuntime
     @ObservedObject private var paneHitRegions: PromptPaneHitRegionRegistry
-    @ObservedObject private var promptModel = PromptModel.shared
+    @ObservedObject private var promptModel = AIModel.shared
     let session: PromptSession
     let shortcut: Int?
     let grouped: Bool
@@ -449,7 +449,7 @@ private struct PromptSidebarSessionRow: View {
         var tint: Color { self == .codex ? PromptTheme.accent : Color(red: 0.83, green: 0.53, blue: 0.31) }
     }
 
-    private var agentActivity: PromptModel.SidebarAgentActivity? {
+    private var agentActivity: AIModel.SidebarAgentActivity? {
         guard let surface else { return nil }
         return promptModel.sidebarAgentActivity(for: surface)
     }

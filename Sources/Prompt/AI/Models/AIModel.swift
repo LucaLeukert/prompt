@@ -7,8 +7,8 @@ import SwiftMath
 import SwiftUI
 
 @MainActor
-final class PromptModel: ObservableObject {
-    static let shared = PromptModel()
+final class AIModel: ObservableObject {
+    static let shared = AIModel()
     nonisolated static let debugModelOptions = ["gpt-5.3-codex-spark", "gpt-5.6-luna"]
 
     @Published var connected = false
@@ -26,7 +26,7 @@ final class PromptModel: ObservableObject {
     @Published var prompt = ""
     @Published var isRunning = false
 
-    let server = CodexAppServer(service: "Main AI")
+    let server = CodexProvider.shared.client
     private weak var terminalResponseSurface: PromptTerminalSurface?
     private var terminalResponseCWD: String?
     private var activeAILane: PromptAILane = .assistant
@@ -44,6 +44,15 @@ final class PromptModel: ObservableObject {
     var selectedReasoningEffort: String? {
         selectedModel == "gpt-5.6-luna" ? "low" : nil
     }
+
+    private func modelID(for capability: AICapability) -> String {
+        CapabilityRouter.shared.route(for: capability)?.modelID ?? selectedModel
+    }
+
+    private func displayModel(for capability: AICapability) -> String {
+        let model = modelID(for: capability)
+        return model.contains("spark") ? "Spark" : model
+    }
     private var terminalRichBlockID: UUID?
     private var streamingMessageID: UUID?
     private var activeTurnID: String?
@@ -52,6 +61,11 @@ final class PromptModel: ObservableObject {
     private var activeToolCalls: [String: PromptToolCall] = [:]
     private var executedCommands: [String] = []
     private var activeRequestText = ""
+    private var externalRequestID: UUID?
+    private weak var externalProvider: (any ConversationProviding)?
+    private var activeConversation: AIConversation?
+    private var isConnecting = false
+    private var connectionWaiters: [(Result<Void, Error>) -> Void] = []
     private final class PendingTerminalRun {
         let requestID: String
         let command: String
@@ -78,54 +92,69 @@ final class PromptModel: ObservableObject {
         // Install the OSC 133 observer before the user runs the first command;
         // context retrieval must not be what activates terminal history.
         _ = PromptBlockStore.shared
-        _ = PromptAmbientAnalyzer.shared
+        _ = AmbientAnalyzer.shared
         server.onNotification = { [weak self] message in self?.handle(message) }
         server.onServerRequest = { [weak self] message in self?.handleRequest(message) }
     }
 
-    func start(cwd: String) {
+    func start(
+        cwd: String,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
         projectRoot = ProjectResolver.resolve(from: cwd)
-        PromptAutocompleteModel.shared.start(cwd: cwd)
-        status = "Connecting to Codex app-server…"
+        AISystem.bootstrap(cwd: cwd)
+        AutocompleteModel.shared.start(cwd: cwd)
+        connected = false
+        status = "Checking ChatGPT sign-in…"
+        CodexProvider.shared.start(cwd: projectRoot)
+        models = [DefaultAIModels.codex]
         server.start { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
                 connected = true
-                status = "Codex connected"
                 refresh()
-            case .failure(let error):
-                status = "Codex unavailable"
-                messages.append(.init(kind: .error, text: error.localizedDescription))
+            case .failure:
+                connected = false
             }
         }
+        restoreConversations()
+        completion?(.success(()))
     }
 
     func refresh() {
+        CodexProvider.shared.refreshAccount { [weak self] message in
+            guard let self else { return }
+            account = CodexProvider.shared.status.isReady ? "ChatGPT" : "Not signed in"
+            status = message
+        }
+        models = [DefaultAIModels.codex]
+        restoreConversations()
         guard connected else { return }
         server.request("thread/list", params: [
             "limit": 50,
             "sortKey": "updated_at",
             "sortDirection": "desc",
             "cwd": projectRoot,
-        ]) { [weak self] result in self?.loadThreads(result) }
-        server.request("model/list", params: ["limit": 100, "includeHidden": true]) { [weak self] result in
-            guard let self, let value = try? result.get() else { return }
-            let data = value["data"] as? [[String: Any]] ?? []
-            models = data.compactMap { ($0["model"] ?? $0["id"]) as? String }
+        ]) { [weak self] result in
+            self?.loadThreads(result)
         }
-        server.request("account/read", params: ["refreshToken": false]) { [weak self] result in
-            guard let self, let value = try? result.get() else { return }
-            let raw = value["account"] as? [String: Any] ?? value
-            account = (raw["email"] as? String) ?? (raw["planType"] as? String) ?? "ChatGPT account"
-        }
-        server.request("account/rateLimits/read", params: [:]) { [weak self] result in
-            guard let self, let value = try? result.get() else { return }
-            rateLimits = Self.describeRateLimits(value)
-        }
+        rateLimits = "Unavailable without app-server"
     }
 
     func select(_ thread: PromptThread) {
+        if let conversation = ConversationStore.shared.load(id: UUID(uuidString: thread.id) ?? UUID()) {
+            activeConversation = conversation
+            activeThreadID = thread.id
+            CapabilityRouter.shared.set(
+                providerID: conversation.providerID,
+                modelID: conversation.modelID,
+                for: conversation.capability)
+            messages = conversation.messages.map(Self.promptMessage)
+            status = "Restored \(conversation.title)"
+            return
+        }
+        activeConversation = nil
         activeThreadID = thread.id
         status = "Resuming \(thread.title)"
         server.request("thread/resume", params: [
@@ -144,25 +173,10 @@ final class PromptModel: ObservableObject {
     }
 
     func newThread() {
-        var params: [String: Any] = [
-            "cwd": projectRoot,
-            "approvalPolicy": "on-request",
-            "sandbox": "workspace-write",
-            "model": selectedModel.isEmpty ? NSNull() : selectedModel,
-            "baseInstructions": PromptBuilder.baseInstructions,
-            "developerInstructions": PromptBuilder.baseInstructions,
-            "threadSource": "appServer",
-        ]
-        if let effort = selectedReasoningEffort { params["reasoningEffort"] = effort }
-        server.request("thread/start", params: params) { [weak self] result in
-            guard let self, let value = try? result.get(),
-                  let thread = value["thread"] as? [String: Any],
-                  let id = thread["id"] as? String else { return }
-            activeThreadID = id
-            messages = []
-            status = "New Prompt thread"
-            refresh()
-        }
+        activeConversation = nil
+        activeThreadID = nil
+        messages = []
+        status = "New Prompt conversation"
     }
 
     func forkThread() {
@@ -192,9 +206,20 @@ final class PromptModel: ObservableObject {
 
     func send() {
         let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, connected, !isRunning else { return }
+        guard !text.isEmpty, !isRunning else { return }
         prompt = ""
         messages.append(.init(kind: .user, text: text))
+        if let provider = conversationProvider(for: .assistant) {
+            provider.start(cwd: projectRoot)
+            startExternalTurn(text, lane: .assistant)
+            return
+        }
+        guard connected,
+              CapabilityRouter.shared.provider(for: .assistant)?
+              .status(for: .assistant).isReady == true else {
+            messages.append(.init(kind: .error, text: "The selected Assistant provider is unavailable."))
+            return
+        }
         if activeThreadID == nil {
             isRunning = true
             createThenSend(text)
@@ -219,12 +244,15 @@ final class PromptModel: ObservableObject {
             PromptController.pressReturn(on: surface)
             return true
         case .ai:
-            guard PromptTerminalSubmissionEligibility.allows(
-                connected: connected,
-                isRunning: isRunning) else {
-                status = connected
+            let capability: AICapability = lane == .agent ? .agent : .assistant
+            let routedProvider = CapabilityRouter.shared.provider(for: capability)
+            routedProvider?.start(cwd: projectRoot)
+            guard let selectedProvider = routedProvider,
+                  routedProvider?.status(for: capability).isReady == true,
+                  !isRunning else {
+                status = routedProvider?.status(for: capability).isReady == true
                     ? "Finish the active Prompt turn before starting another."
-                    : "Codex app-server is not connected yet."
+                    : "The selected \(capability.rawValue.capitalized) provider is unavailable."
                 return false
             }
 
@@ -238,18 +266,33 @@ final class PromptModel: ObservableObject {
             if remote == nil {
                 projectRoot = ProjectResolver.resolve(from: surface.pwd ?? projectRoot)
             }
-            clearInput?()
             terminalRichBlockID = PromptRichContentStore.shared.begin(
                 request: value,
                 lane: lane,
-                model: selectedModel.contains("spark") ? "Spark" : selectedModel,
+                model: displayModel(for: capability),
                 on: surface)
+            // Reserve beneath the visible input first. Clearing readline/ZLE
+            // afterward happens on the new live row, leaving the submitted
+            // request intact as ordinary Ghostty terminal history.
+            clearInput?()
             // The rich block has its own reserved scrollback rows. Restore the
             // child shell prompt immediately so AI and shell work can proceed
             // independently on the same surface.
             if remote == nil || surface.isComposite { PromptController.pressReturn(on: surface) }
             messages.append(.init(kind: .user, text: value))
-            createTerminalThreadThenSend(value)
+            if lane == .agent, selectedProvider.descriptor.id == .codex {
+                guard connected else {
+                    failTerminalTurn("Codex app-server is not connected yet.")
+                    return true
+                }
+                createTerminalThreadThenSend(value)
+                return true
+            }
+            if selectedProvider is any ConversationProviding {
+                startExternalTurn(value, lane: lane)
+                return true
+            }
+            failTerminalTurn("The selected provider does not implement conversation execution.")
             return true
         }
     }
@@ -269,7 +312,11 @@ final class PromptModel: ObservableObject {
         guard terminalResponseSurface === surface,
               isRunning,
               let blockID = terminalRichBlockID else { return false }
-        if let threadID = activeThreadID, let turnID = activeTurnID {
+        if let externalRequestID, let externalProvider {
+            externalProvider.cancel(requestID: externalRequestID)
+            self.externalRequestID = nil
+            self.externalProvider = nil
+        } else if let threadID = activeThreadID, let turnID = activeTurnID {
             server.request("turn/interrupt", params: ["threadId": threadID, "turnId": turnID]) { _ in }
             cancelledTurnIDs.insert(turnID)
         } else {
@@ -290,12 +337,88 @@ final class PromptModel: ObservableObject {
         return true
     }
 
+    private func conversationProvider(for capability: AICapability) -> (any ConversationProviding)? {
+        CapabilityRouter.shared.provider(for: capability) as? any ConversationProviding
+    }
+
+    private func startExternalTurn(_ text: String, lane: PromptAILane) {
+        let capability: AICapability = lane == .agent ? .agent : .assistant
+        guard let provider = conversationProvider(for: capability),
+              provider.status(for: capability).isReady,
+              let route = CapabilityRouter.shared.route(for: capability) else {
+            failTerminalTurn("The selected \(capability.rawValue.capitalized) provider is unavailable.")
+            return
+        }
+        activeTurnKind = .terminal(lane)
+        isRunning = true
+        activeRequestText = text
+        status = "\(provider.descriptor.displayName) is working…"
+        let message = PromptMessage(kind: .assistant, text: "")
+        messages.append(message)
+        streamingMessageID = message.id
+        externalProvider = provider
+        ensureActiveConversation(for: capability, route: route, title: text)
+        persistActiveConversation()
+        let previousConversation = messages.dropLast().compactMap { message -> String? in
+            switch message.kind {
+            case .user: "User: \(message.text)"
+            case .assistant: "Assistant: \(message.text)"
+            case .activity, .error: nil
+            }
+        }.joined(separator: "\n\n")
+        externalRequestID = provider.respond(
+            to: .init(
+                text: text,
+                instructions: lane == .agent
+                    ? PromptBuilder.agentInstructions
+                    : PromptBuilder.assistantInstructions,
+                modelID: route.modelID,
+                projectRoot: projectRoot,
+                terminalContext: terminalResponseSurface.map {
+                    String($0.cachedVisibleContents.get().suffix(12_000))
+                } ?? terminalContext,
+                conversationContext: previousConversation,
+                // Direct provider turns have no native PromptApproval bridge.
+                // Agent-mode mutations must stay behind the app-server
+                // terminal_run flow, which creates an approval for each command.
+                allowsWorkspaceWrites: false),
+            onEvent: { [weak self] event in
+                self?.handleExternal(event)
+            })
+    }
+
+    private func handleExternal(_ event: ConversationEvent) {
+        switch event {
+        case .textDelta(let delta):
+            if let id = streamingMessageID,
+               let index = messages.firstIndex(where: { $0.id == id }) {
+                messages[index].text += delta
+            }
+            persistActiveConversation()
+            if let surface = terminalResponseSurface, let blockID = terminalRichBlockID {
+                PromptRichContentStore.shared.enqueue(delta, to: blockID, on: surface)
+            }
+        case .completed:
+            status = "Turn complete"
+            isRunning = false
+            externalRequestID = nil
+            externalProvider = nil
+            finishTerminalStream()
+            streamingMessageID = nil
+            persistActiveConversation()
+        case .failed(let message):
+            externalRequestID = nil
+            externalProvider = nil
+            failTerminalTurn(message)
+        }
+    }
+
     private func createThenSend(_ text: String) {
         var params: [String: Any] = [
             "cwd": projectRoot,
             "approvalPolicy": "on-request",
             "sandbox": "workspace-write",
-            "model": selectedModel.isEmpty ? NSNull() : selectedModel,
+            "model": modelID(for: .assistant),
             "baseInstructions": PromptBuilder.baseInstructions,
             "developerInstructions": PromptBuilder.baseInstructions,
         ]
@@ -327,7 +450,7 @@ final class PromptModel: ObservableObject {
             // Agent execution is exclusively mediated by terminal_run below.
             "approvalPolicy": "never",
             "sandbox": "read-only",
-            "model": selectedModel.isEmpty ? NSNull() : selectedModel,
+            "model": modelID(for: activeAILane == .agent ? .agent : .assistant),
             "baseInstructions": instructions,
             "developerInstructions": instructions,
             // Advertise only capabilities that can actually be called in this
@@ -399,7 +522,7 @@ final class PromptModel: ObservableObject {
             "threadId": id,
             "input": prompt.appServerInput,
             "cwd": projectRoot,
-            "model": selectedModel.isEmpty ? NSNull() : selectedModel,
+            "model": modelID(for: lane == .agent ? .agent : .assistant),
         ]
         if let effort = selectedReasoningEffort { params["reasoningEffort"] = effort }
         switch kind {
@@ -449,6 +572,71 @@ final class PromptModel: ObservableObject {
         terminalResponseCWD = nil
         declinePendingTerminalRuns(reason: text)
         activeTurnID = nil
+        persistActiveConversation()
+    }
+
+    private func restoreConversations() {
+        let conversations = ConversationStore.shared.list()
+        threads = storedThreads(conversations)
+        guard activeConversation == nil, let conversation = conversations.first else { return }
+        activeConversation = conversation
+        activeThreadID = conversation.id.uuidString
+        messages = conversation.messages.map(Self.promptMessage)
+    }
+
+    private func storedThreads(_ conversations: [AIConversation] = ConversationStore.shared.list()) -> [PromptThread] {
+        let formatter = ISO8601DateFormatter()
+        return conversations.map {
+            .init(
+                id: $0.id.uuidString,
+                title: $0.title,
+                cwd: $0.projectRoot ?? "",
+                updatedAt: formatter.string(from: $0.updatedAt))
+        }
+    }
+
+    private func ensureActiveConversation(
+        for capability: AICapability,
+        route: CapabilityRoute,
+        title: String
+    ) {
+        guard activeConversation?.capability != capability
+            || activeConversation?.providerID != route.providerID
+            || activeConversation?.modelID != route.modelID else { return }
+        activeConversation = .init(
+            capability: capability,
+            providerID: route.providerID,
+            modelID: route.modelID,
+            title: String(title.prefix(80)),
+            projectRoot: projectRoot)
+        activeThreadID = activeConversation?.id.uuidString
+    }
+
+    private func persistActiveConversation() {
+        guard var conversation = activeConversation else { return }
+        conversation.updatedAt = Date()
+        conversation.messages = messages.compactMap { message in
+            let role: ConversationMessage.Role = switch message.kind {
+            case .user: .user
+            case .assistant: .assistant
+            case .activity: .activity
+            case .error: .error
+            }
+            return .init(role: role, text: message.text)
+        }
+        activeConversation = conversation
+        _ = ConversationStore.shared.save(conversation)
+        restoreConversations()
+    }
+
+    private static func promptMessage(_ message: ConversationMessage) -> PromptMessage {
+        let kind: PromptMessage.Kind = switch message.role {
+        case .user: .user
+        case .assistant: .assistant
+        case .activity: .activity
+        case .error: .error
+        }
+        return .init(kind: kind, text: message.text)
     }
 
     func captureTerminal() {
@@ -583,13 +771,17 @@ final class PromptModel: ObservableObject {
     private func loadThreads(_ result: Result<[String: Any], Error>) {
         guard let value = try? result.get() else { return }
         let data = value["data"] as? [[String: Any]] ?? []
-        threads = data.compactMap { raw in
+        let appServerThreads: [PromptThread] = data.compactMap { raw in
             guard let id = raw["id"] as? String else { return nil }
             return PromptThread(
                 id: id,
                 title: (raw["name"] as? String) ?? (raw["preview"] as? String)?.components(separatedBy: .newlines).first ?? "Codex thread",
                 cwd: raw["cwd"] as? String ?? "",
                 updatedAt: String(describing: raw["updatedAt"] ?? raw["createdAt"] ?? ""))
+        }
+        let stored = storedThreads()
+        threads = (stored + appServerThreads).reduce(into: []) { result, thread in
+            if !result.contains(where: { $0.id == thread.id }) { result.append(thread) }
         }
     }
 
@@ -671,7 +863,9 @@ final class PromptModel: ObservableObject {
                 let object = rawResponse.data(using: .utf8).flatMap {
                     try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
                 }
-                displayResponse = object?["response"] as? String ?? rawResponse
+                displayResponse = Self.terminalDisplayResponse(
+                    object?["response"] as? String ?? rawResponse
+                )
                 suggestedCommand = nil
             }
             if let messageID = streamingMessageID,
@@ -690,6 +884,18 @@ final class PromptModel: ObservableObject {
             refresh()
         case "account/rateLimits/updated":
             rateLimits = Self.describeRateLimits(params)
+        case "account/updated":
+            if let accountValue = params["account"] as? [String: Any] {
+                account = (accountValue["email"] as? String)
+                    ?? (accountValue["planType"] as? String)
+                    ?? "ChatGPT account"
+                CodexProvider.shared.markReady(account: account)
+                status = "Codex connected"
+                refresh()
+            } else {
+                CodexProvider.shared.markUnavailable(.authenticationRequired)
+                status = "ChatGPT sign-in required"
+            }
         case "error":
             isRunning = false
             let text = Self.serverErrorMessage(from: params) ?? "Codex error"
@@ -766,7 +972,7 @@ final class PromptModel: ObservableObject {
     }
 
     private func handleRequest(_ message: [String: Any]) {
-        guard let id = CodexAppServer.stringID(message["id"]),
+        guard let id = CodexRPCClient.stringID(message["id"]),
               let method = message["method"] as? String else { return }
         let params = message["params"] as? [String: Any] ?? [:]
         if method == "item/tool/call" {
@@ -925,10 +1131,67 @@ final class PromptModel: ObservableObject {
         return percent("primary") ?? percent("secondary") ?? "Limits available"
     }
 
+    nonisolated static func terminalDisplayResponse(_ response: String) -> String {
+        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["response:", "**response:**"]
+        let lowercased = trimmed.lowercased()
+
+        let withoutLabel: String
+        if let prefix = prefixes.first(where: { lowercased.hasPrefix($0) }) {
+            withoutLabel = String(trimmed.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            withoutLabel = trimmed
+        }
+        return PromptAIOutputSanitizer.sanitize(withoutLabel)
+    }
+
     private static func commandText(from item: [String: Any]) -> String? {
         if let command = item["command"] as? String { return command }
         if let command = item["command"] as? [String] { return command.joined(separator: " ") }
         return nil
     }
 
+}
+
+enum PromptAIOutputSanitizer {
+    private static let documentFenceLanguages = [
+        "markdown", "md", "gfm", "commonmark",
+    ]
+
+    /// Models sometimes wrap a complete rendered answer in a `markdown`
+    /// code fence. Unwrap only that exact whole-document shape. Other fenced
+    /// languages and partial/malformed fences remain literal user content.
+    nonisolated static func sanitize(_ source: String) -> String {
+        var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        for _ in 0 ..< 2 {
+            guard let unwrapped = unwrapMarkdownDocumentFence(value) else { break }
+            value = unwrapped.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
+    }
+
+    private nonisolated static func unwrapMarkdownDocumentFence(_ source: String) -> String? {
+        guard let firstBreak = source.firstIndex(of: "\n"),
+              let lastBreak = source.lastIndex(of: "\n"),
+              firstBreak < lastBreak else { return nil }
+
+        let opening = String(source[..<firstBreak])
+            .trimmingCharacters(in: .whitespaces)
+        guard let marker = opening.first, marker == "`" || marker == "~" else { return nil }
+        let markerCount = opening.prefix { $0 == marker }.count
+        guard markerCount >= 3 else { return nil }
+
+        let language = opening.dropFirst(markerCount)
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        guard documentFenceLanguages.contains(language) else { return nil }
+
+        let closing = String(source[source.index(after: lastBreak)...])
+            .trimmingCharacters(in: .whitespaces)
+        guard closing.count >= markerCount,
+              closing.allSatisfy({ $0 == marker }) else { return nil }
+
+        return String(source[source.index(after: firstBreak) ..< lastBreak])
+    }
 }

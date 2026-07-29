@@ -159,7 +159,7 @@ struct PromptAITests {
     }
 
     @Test func debugModelOptionsIncludeLunaLow() {
-        #expect(PromptModel.debugModelOptions.contains("gpt-5.6-luna"))
+        #expect(AIModel.debugModelOptions.contains("gpt-5.6-luna"))
     }
 
     @Test func promptBuilderKeepsIrrelevantAmbientContextOut() {
@@ -205,6 +205,16 @@ struct PromptAITests {
         #expect(assistant.baseInstructions.contains("actionable shell instructions"))
         #expect(agent.baseInstructions == PromptBuilder.agentInstructions)
         #expect(agent.baseInstructions.contains("not a code editor"))
+    }
+
+    @Test func promptFormattingContractDistinguishesRenderedLatexFromLiteralSource() {
+        let instructions = PromptBuilder.richFormattingInstructions
+        #expect(instructions.contains(#"raw `\(...\)` delimiters"#))
+        #expect(instructions.contains("without Markdown backticks"))
+        #expect(instructions.contains("fenced `latex` block"))
+        #expect(PromptBuilder.assistantInstructions.contains(instructions))
+        #expect(PromptBuilder.agentInstructions.contains(instructions))
+        #expect(PromptBuilder.remoteAssistantInstructions.contains(instructions))
     }
 
     @Test func promptBuilderConstrainsRemoteAssistantToRemoteTerminalTools() {
@@ -308,20 +318,20 @@ struct PromptAITests {
     }
 
     @Test func copilotCompletionDefaultsToShellInputScope() {
-        #expect(PromptAutocompleteModel.shouldComplete(
+        #expect(AutocompleteModel.shouldComplete(
             prefix: "git checkout feat", completesAIInput: false))
-        #expect(PromptAutocompleteModel.shouldComplete(
+        #expect(AutocompleteModel.shouldComplete(
             prefix: "cat READ", completesAIInput: false))
-        #expect(!PromptAutocompleteModel.shouldComplete(
+        #expect(!AutocompleteModel.shouldComplete(
             prefix: "what is in read", completesAIInput: false))
-        #expect(PromptAutocompleteModel.shouldComplete(
+        #expect(AutocompleteModel.shouldComplete(
             prefix: "what is in read", completesAIInput: true))
-        #expect(PromptAutocompleteModel.shouldComplete(
+        #expect(AutocompleteModel.shouldComplete(
             prefix: "git checkout feat",
             completesAIInput: false,
             shell: "/bin/zsh",
             cwd: "/tmp"))
-        #expect(!PromptAutocompleteModel.shouldComplete(
+        #expect(!AutocompleteModel.shouldComplete(
             prefix: "explain why the build failed",
             completesAIInput: false,
             shell: "/bin/zsh",
@@ -397,8 +407,55 @@ struct PromptAITests {
     }
 
     @Test func copilotCompletionSuffixesAreCleanedForTerminalInsertion() {
-        #expect(PromptAutocompleteModel.clean("git status --short\n", prefix: "git sta") == "tus --short")
-        #expect(PromptAutocompleteModel.clean("```shell\ntus\n```", prefix: "git sta") == "tus")
+        #expect(AutocompleteModel.clean("git status --short\n", prefix: "git sta") == "tus --short")
+        #expect(AutocompleteModel.clean("```shell\ntus\n```", prefix: "git sta") == "tus")
+    }
+
+    @Test func copilotFiltersDirectoryChangesThatResolveToTheCurrentDirectory() {
+        let cwd = "/tmp/project"
+        #expect(CopilotProvider.isNoOpCompletion(prefix: "cd ", suffix: cwd, cwd: cwd))
+        #expect(CopilotProvider.isNoOpCompletion(prefix: "cd ", suffix: ".", cwd: cwd))
+        #expect(CopilotProvider.isNoOpCompletion(prefix: "cd ", suffix: "$PWD", cwd: cwd))
+        #expect(CopilotProvider.isNoOpCompletion(prefix: "cd \"", suffix: "\(cwd)\"", cwd: cwd))
+        #expect(!CopilotProvider.isNoOpCompletion(prefix: "cd ", suffix: "../other", cwd: cwd))
+        #expect(!CopilotProvider.isNoOpCompletion(prefix: "cat ", suffix: "package.json", cwd: cwd))
+    }
+
+    @Test func copilotVirtualDocumentCannotLeakAnInternalFilename() {
+        #expect(CopilotCompletionServer.completionDocumentURI.hasPrefix("untitled:"))
+        #expect(!CopilotCompletionServer.completionDocumentURI.hasPrefix("file:"))
+        #expect(CopilotCompletionServer.isInternalArtifactCompletion("cat prompt-terminal.sh"))
+        #expect(CopilotCompletionServer.isInternalArtifactCompletion("less terminal-session"))
+        #expect(!CopilotCompletionServer.isInternalArtifactCompletion("cat Makefile"))
+    }
+
+    @Test func copilotDocumentUsesEditorContentInsteadOfPromptInstructions() {
+        let document = CopilotCompletionServer.completionDocument(
+            prefix: "git ",
+            cwd: "/tmp/project",
+            terminal: "git status --short")
+        let lines = document.text.split(separator: "\n", omittingEmptySubsequences: false)
+
+        #expect(lines[document.line] == "git ")
+        #expect(document.character == 4)
+        #expect(document.text.contains("# Recent terminal context:"))
+        #expect(document.text.contains("# git status --short"))
+        #expect(!document.text.contains("Missing suffix"))
+        #expect(!document.text.contains("Output only"))
+        #expect(!document.text.contains("Valid completed command lines"))
+        #expect(!document.text.contains("prompt-terminal-context.sh"))
+    }
+
+    @Test func copilotDocumentKeepsBoundedRecentTerminalContext() {
+        let terminal = (0 ..< 100).map { "command-\($0)" }.joined(separator: "\n")
+        let document = CopilotCompletionServer.completionDocument(
+            prefix: "git ",
+            cwd: "/tmp/project",
+            terminal: terminal)
+
+        #expect(document.text.contains("# command-0\n"))
+        #expect(document.text.contains("# command-99\n"))
+        #expect(document.text.split(separator: "\n").count == 104)
     }
 
     @Test func completionContextResolvesPartialPathsAndGitProject() throws {
@@ -415,7 +472,7 @@ struct PromptAITests {
         #expect(context.document.contains("# Git branch: context-test"))
         #expect(context.document.contains("# - src/project-alpha/"))
         #expect(context.document.contains("# - cd src/project-alpha/"))
-        #expect(context.document.split(separator: "\n", omittingEmptySubsequences: false)[context.commandLine] == "# ")
+        #expect(context.document.split(separator: "\n", omittingEmptySubsequences: false)[context.commandLine] == "cd src/pro")
         #expect(context.expectsSuffixOnly)
     }
 
@@ -428,7 +485,7 @@ struct PromptAITests {
             prefix: "cd Vendor/ghostty/     ", cwd: root.path, terminal: "")
         #expect(context.pathCandidates == ["Vendor/ghostty/macos/"])
         #expect(context.document.contains("# - cd Vendor/ghostty/macos/"))
-        #expect(context.document.split(separator: "\n", omittingEmptySubsequences: false)[context.commandLine] == "# ")
+        #expect(context.document.split(separator: "\n", omittingEmptySubsequences: false)[context.commandLine] == "cd Vendor/ghostty/")
     }
 
     @Test func completionContextParsesPipelinesAndLoadsProjectScripts() throws {
@@ -445,6 +502,22 @@ struct PromptAITests {
         #expect(context.document.contains("# Cursor role: argument 2 for npm"))
         #expect(context.document.contains("# - npm run build"))
         #expect(context.document.contains("# - swift-argument-parser"))
+    }
+
+    @Test func completionContextTreatsTrailingSpaceAsANewArgument() {
+        let context = PromptCompletionContextEngine.build(
+            prefix: "git ",
+            cwd: "/tmp",
+            terminal: "")
+
+        #expect(context.document.contains("# Active command: git"))
+        #expect(context.document.contains("# Cursor role: argument 1 for git"))
+        #expect(!context.document.contains("# Cursor role: command name"))
+        #expect(!context.document.contains("# Matching executable commands on PATH:"))
+        #expect(!context.document.contains("# - ggit"))
+        #expect(context.document.split(
+            separator: "\n",
+            omittingEmptySubsequences: false)[context.commandLine] == "git ")
     }
 
     @Test func completionContextRecognizesRedirectionTargets() throws {
@@ -501,12 +574,64 @@ struct PromptAITests {
     @Test func richParserSeparatesMarkdownAndLatex() {
         #expect(PromptRichParser.segments("## Result\n\n$$x = \\frac{1}{2}$$\n\nDone.") == [
             .markdown("## Result\n\n"),
-            .math("x = \\frac{1}{2}"),
+            .displayLatex("x = \\frac{1}{2}"),
             .markdown("\n\nDone."),
         ])
         #expect(PromptRichParser.segments("Streaming $x + 1") == [
             .markdown("Streaming $x + 1"),
         ])
+    }
+
+    @Test func richParserTypesetsFencedLatexAndPreservesOrdinaryCodeFences() {
+        let source = """
+        Before
+        ```latex
+        \\documentclass{article}
+        \\begin{document}
+        \\[
+        \\int_0^1 x^2 dx = \\frac{1}{3}
+        \\]
+        \\end{document}
+        ```
+        ```swift
+        let price = "$5"
+        ```
+        """
+        let segments = PromptRichParser.segments(source)
+        #expect(segments.contains(.displayLatex(#"\int_0^1 x^2 dx = \frac{1}{3}"#)))
+        #expect(segments.contains {
+            if case .markdown(let value) = $0 {
+                return value.contains("```swift") && value.contains(#""$5""#)
+            }
+            return false
+        })
+    }
+
+    @Test func richParserLeavesLatexDelimitersInsideMarkdownCodeSpans() {
+        let source = #"Use it in `\(...\)` or `\[...\]`, then render \(\frac{1}{2}\)."#
+        #expect(PromptRichParser.segments(source) == [
+            .markdown(#"Use it in `\(...\)` or `\[...\]`, then render "#),
+            .inlineLatex(#"\frac{1}{2}"#),
+            .markdown("."),
+        ])
+    }
+
+    @Test func richParserKeepsInlineLatexInTheSurroundingTextFlow() {
+        #expect(PromptRichParser.segments(
+            #"the \(\ker f\) I seek, while \(\nabla\cdot \mathbf{F}=0\) remains."#
+        ) == [
+            .markdown("the "),
+            .inlineLatex(#"\ker f"#),
+            .markdown(" I seek, while "),
+            .inlineLatex(#"\nabla\cdot \mathbf{F}=0"#),
+            .markdown(" remains."),
+        ])
+    }
+
+    @Test func unsupportedLatexFallsBackWithoutReplacingTheResponse() {
+        #expect(PromptLatexRenderer.canRender(#"\int_0^1 x^2\,dx"#))
+        #expect(!PromptLatexRenderer.canRender(
+            #"\begin{verse}At \(x=0\), silence hums.\end{verse}"#))
     }
 
     @Test func projectResolverFindsGitRoot() throws {
@@ -531,9 +656,9 @@ struct PromptAITests {
     }
 
     @Test func requestIDsDecodeBothJSONRepresentations() {
-        #expect(CodexAppServer.stringID(42) == "42")
-        #expect(CodexAppServer.stringID("thread-request") == "thread-request")
-        #expect(CodexAppServer.stringID(nil) == nil)
+        #expect(CodexRPCClient.stringID(42) == "42")
+        #expect(CodexRPCClient.stringID("thread-request") == "thread-request")
+        #expect(CodexRPCClient.stringID(nil) == nil)
     }
 
     @Test func inputClassifierSeparatesShellFromNaturalLanguage() {
@@ -642,14 +767,59 @@ struct PromptAITests {
         let short = PromptRichContentStore.requiredRows(
             request: "hello", response: "Short answer.", toolCalls: 0, columns: 80)
         let long = PromptRichContentStore.requiredRows(
-            request: "read this", response: String(repeating: "wrapped content ", count: 80), toolCalls: 2, columns: 40)
-        #expect(short == 8)
+            request: "read this", response: String(repeating: "wrapped content ", count: 300), toolCalls: 2, columns: 40)
+        #expect(short == 2)
         #expect(long > short)
-        #expect(long <= 80)
+        #expect(long > 80)
         #expect(PromptRichContentStore.nextReservationRows(
-            current: 6, required: 40, maximum: 24, frozen: false) == 24)
+            current: 2, required: 40, maximum: 24, frozen: false) == 24)
         #expect(PromptRichContentStore.nextReservationRows(
-            current: 6, required: 40, maximum: 24, frozen: true) == 6)
+            current: 2, required: 40, maximum: 24, frozen: true) == 2)
+    }
+
+    @Test func terminalResponseLabelIsNotRendered() {
+        #expect(AIModel.terminalDisplayResponse("response: Hello.") == "Hello.")
+        #expect(AIModel.terminalDisplayResponse("**Response:**\nHello.") == "Hello.")
+        #expect(AIModel.terminalDisplayResponse("A response: remains intact.") == "A response: remains intact.")
+    }
+
+    @Test func terminalResponseUnwrapsOnlyWholeMarkdownDocumentFences() {
+        let wrapped = """
+        ```markdown
+        # Title
+
+        Render \\(x^2\\), please.
+        ```
+        """
+        #expect(AIModel.terminalDisplayResponse(wrapped) == """
+        # Title
+
+        Render \\(x^2\\), please.
+        """)
+        #expect(AIModel.terminalDisplayResponse("""
+        ```swift
+        print("keep this fence")
+        ```
+        """).hasPrefix("```swift"))
+        #expect(AIModel.terminalDisplayResponse("""
+        Before
+        ```markdown
+        literal example
+        ```
+        """).hasPrefix("Before"))
+    }
+
+    @Test func codexExecPreservesMarkdownAndUnicodeInFinalJSONRecord() throws {
+        let markdown = "```swift\nlet π = \"✓\"\n```"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "type": "item.completed",
+            "item": ["type": "agent_message", "text": markdown],
+        ])
+        guard case .textDelta(let decoded) = CodexExecClient.event(from: data) else {
+            Issue.record("Expected an agent message event")
+            return
+        }
+        #expect(decoded == markdown)
     }
 
     @Test @MainActor func compositeSurfaceMirrorsOutputAndForwardsEncodedInput() async throws {
@@ -696,6 +866,68 @@ struct PromptAITests {
         } while !contents.contains("composite-io-probe") && ContinuousClock.now < deadline
 
         #expect(contents.contains("composite-io-probe"))
+    }
+
+    @Test func providerIdentifiersAndConversationBindingsRoundTrip() throws {
+        let conversation = AIConversation(
+            capability: .assistant,
+            providerID: .openAI,
+            modelID: "gpt-test",
+            title: "Provider-bound conversation",
+            projectRoot: "/tmp/project")
+        let data = try JSONEncoder().encode(conversation)
+        let decoded = try JSONDecoder().decode(AIConversation.self, from: data)
+
+        #expect(decoded.providerID == .openAI)
+        #expect(decoded.capability == .assistant)
+        #expect(decoded.modelID == "gpt-test")
+        #expect(decoded.schemaVersion == AIConversation.schemaVersion)
+    }
+
+    @Test func conversationStorePersistsAndListsProviderOwnedMetadata() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = ConversationStore(paths: PromptPaths(homeDirectory: home))
+        var conversation = AIConversation(
+            capability: .agent,
+            providerID: .codex,
+            modelID: "codex-test",
+            title: "Bound agent")
+        conversation.messages.append(.init(role: .user, text: "inspect this"))
+
+        #expect(store.save(conversation))
+        let loaded = store.load(id: conversation.id)
+        #expect(loaded?.id == conversation.id)
+        #expect(loaded?.providerID == .codex)
+        #expect(loaded?.messages.map(\.text) == ["inspect this"])
+        #expect(store.list().map(\.id) == [conversation.id])
+    }
+
+    @Test @MainActor func builtInProviderDescriptorsDeclareExactCapabilities() {
+        #expect(CopilotProvider.shared.descriptor.capabilities == [.assistant, .autocomplete])
+        #expect(CodexProvider.shared.descriptor.capabilities == [.assistant, .agent])
+        #expect(OpenAIProvider.shared.descriptor.capabilities == [.assistant])
+    }
+
+    @Test @MainActor func codexUsesSparkThroughEphemeralCLIExecution() {
+        #expect(DefaultAIModels.codex == "gpt-5.3-codex-spark")
+        let request = ConversationRequest(
+            text: "status",
+            instructions: "Answer briefly.",
+            modelID: DefaultAIModels.codex,
+            projectRoot: "/tmp",
+            terminalContext: "",
+            conversationContext: "",
+            allowsWorkspaceWrites: false)
+        let arguments = CodexExecClient.arguments(for: request)
+
+        #expect(arguments.contains("--ephemeral"))
+        #expect(arguments.contains("--json"))
+        #expect(arguments.contains("--ignore-user-config"))
+        #expect(arguments[arguments.firstIndex(of: "--model")! + 1] == "gpt-5.3-codex-spark")
+        #expect(arguments[arguments.firstIndex(of: "--sandbox")! + 1] == "read-only")
+        #expect(!arguments.contains("app-server"))
     }
 
     @MainActor

@@ -13,7 +13,7 @@ final class PromptController: NSObject {
 
     func install() {
         let cwd = activeSurface()?.pwd ?? FileManager.default.homeDirectoryForCurrentUser.path
-        PromptModel.shared.start(cwd: cwd)
+        AIModel.shared.start(cwd: cwd)
     }
 
     func attach(to window: NSWindow) {
@@ -27,7 +27,7 @@ final class PromptController: NSObject {
     }
 
     func show() {
-        PromptModel.shared.captureTerminal()
+        AIModel.shared.captureTerminal()
         NotificationCenter.default.post(name: .promptFocusCommandBar, object: activeSurface())
     }
 
@@ -74,7 +74,7 @@ enum PromptSurfaceMode: String, CaseIterable {
     case agent = "Agent"
 
     var icon: String {
-        switch self {
+        return switch self {
         case .autoShell: "wand.and.stars"
         case .shell: "terminal"
         case .assistant: "bubble.left.and.text.bubble.right"
@@ -97,6 +97,29 @@ enum PromptSurfaceMode: String, CaseIterable {
         case .assistant: .assistant
         case .agent: .agent
         }
+    }
+
+    @MainActor
+    func isAvailable(on surfaceView: PromptTerminalSurface) -> Bool {
+        return switch self {
+        case .shell:
+            true
+        case .autoShell, .assistant:
+            AIProviderRegistry.shared.hasReadyProvider(for: .assistant)
+        case .agent:
+            !PromptTerminalCapabilities.isManagedRemote(surfaceView)
+                && AIProviderRegistry.shared.hasReadyProvider(for: .agent)
+        }
+    }
+
+    @MainActor
+    func nextAvailable(on surfaceView: PromptTerminalSurface) -> Self {
+        var candidate = next
+        for _ in Self.allCases {
+            if candidate.isAvailable(on: surfaceView) { return candidate }
+            candidate = candidate.next
+        }
+        return .shell
     }
 }
 
@@ -281,7 +304,11 @@ private enum PromptShellInputProbe {
               FileManager.default.isExecutableFile(atPath: shell) else {
             return .shell
         }
-        let cacheKey = "\(shell)\u{0}\(cwd ?? "")\u{0}\(text)"
+        // Classification determines whether the first token names a command.
+        // It must not touch the terminal's working directory: this method is
+        // called by continuously-polled UI and a cwd on a removable volume
+        // would make macOS display the same privacy prompt over and over.
+        let cacheKey = "\(shell)\u{0}\(text)"
         cacheLock.lock()
         if let cached = cache[cacheKey] {
             cacheLock.unlock()
@@ -307,9 +334,7 @@ private enum PromptShellInputProbe {
             if let value = inherited[key] { environment[key] = value }
         }
         process.environment = environment
-        if let cwd, FileManager.default.fileExists(atPath: cwd) {
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
-        }
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -404,20 +429,20 @@ enum PromptNativeInputRouter {
         let result = PromptTabDisposition.resolve(
             surfaceMode: surfaceMode(for: surfaceView),
             input: input,
-            hasAutocomplete: !PromptAutocompleteModel.shared.suggestion(for: surfaceView).isEmpty)
-        if case .switchMode(.agent) = result,
-           PromptTerminalCapabilities.isManagedRemote(surfaceView) {
-            return .switchMode(.autoShell)
+            hasAutocomplete: !AutocompleteModel.shared.suggestion(for: surfaceView).isEmpty)
+        if case .switchMode(let mode) = result {
+            return .switchMode(
+                mode.isAvailable(on: surfaceView)
+                    ? mode
+                    : surfaceMode(for: surfaceView).nextAvailable(on: surfaceView))
         }
         return result
     }
 
     static func selectSurfaceMode(_ mode: PromptSurfaceMode, for surfaceView: PromptTerminalSurface) {
-        let allowedMode: PromptSurfaceMode = mode == .agent && PromptTerminalCapabilities.isManagedRemote(surfaceView)
-            ? .assistant
-            : mode
+        let allowedMode = mode.isAvailable(on: surfaceView) ? mode : .shell
         setSurfaceMode(allowedMode, for: surfaceView)
-        PromptAutocompleteModel.shared.clear(on: surfaceView)
+        AutocompleteModel.shared.clear(on: surfaceView)
         DispatchQueue.main.async { surfaceView.focus() }
     }
 
@@ -513,7 +538,7 @@ enum PromptNativeInputRouter {
         let value = PromptInputClassifier.strippedInput(raw)
         guard !value.isEmpty, let surface = surfaceView.surface else { return false }
 
-        _ = PromptModel.shared.submitFromTerminal(
+        _ = AIModel.shared.submitFromTerminal(
             value,
             mode: .ai,
             lane: resolution.lane ?? .assistant,
